@@ -1,0 +1,5 @@
+# MetaTrader5 python package only works on Windows (the MT5 terminal itself
+# is Windows-only; the package talks to a locally running terminal via its
+# native DLL). Install this ONLY on the Windows host/VM/VPS that runs MT5.
+# See README.md "MetaTrader 5 deployment" section.
+MetaTrader5==5.0.4874

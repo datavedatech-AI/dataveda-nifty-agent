@@ -1,0 +1,11 @@
+services:
+  agent:
+    build: .
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    volumes:
+      - ./data:/app/data
+      - ./symbol_map.json:/app/symbol_map.json:ro
+    restart: unless-stopped

@@ -1,0 +1,25 @@
+{
+  "NIFTY": {
+    "dhan": {
+      "security_id": "13",
+      "exchange_segment": "IDX_I",
+      "lot_size": 75
+    },
+    "mt5": {
+      "symbol": "NAS100",
+      "_note": "Example only - NIFTY itself isn't tradeable on most MT5 brokers. Replace with a real MT5 symbol you intend to trade, e.g. an index CFD or forex pair."
+    }
+  },
+  "BANKNIFTY": {
+    "dhan": {
+      "security_id": "25",
+      "exchange_segment": "IDX_I",
+      "lot_size": 35
+    }
+  },
+  "EURUSD": {
+    "mt5": {
+      "symbol": "EURUSD"
+    }
+  }
+}

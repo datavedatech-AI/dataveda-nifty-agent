@@ -1,0 +1,5 @@
+# Install on the Windows host running the MT5 terminal (MT5_MODE=bridge).
+-r requirements-mt5.txt
+fastapi==0.115.0
+uvicorn[standard]==0.30.6
+pydantic==2.9.2
