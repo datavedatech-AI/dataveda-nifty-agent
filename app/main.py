@@ -1,19 +1,30 @@
 import logging
 from contextlib import asynccontextmanager
-from dataclasses import asdict
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
-from pydantic import ValidationError
-from sqlalchemy.orm import Session
+from pydantic import BaseModel, EmailStr, ValidationError
+from sqlalchemy.ext.asyncio import AsyncSession
+from starlette.websockets import WebSocket, WebSocketDisconnect
 
-from app.brokers.registry import build_brokers
 from app.config import Settings, get_settings
 from app.models.signal import TradingViewSignal
-from app.risk.manager import RiskManager
-from app.security.auth import ip_allowed, passphrase_matches
+from app.security.auth import passphrase_matches
 from app.services.order_router import process_signal
-from app.storage.db import Base, make_engine, make_session_factory
-from app.storage.repository import get_kill_switch, get_today_realized_pnl, set_kill_switch
+from app.storage.db import init_models, make_engine, make_session_factory
+from app.storage.models import Tenant
+from app.storage.repository import (
+    create_tenant,
+    get_tenant_by_agent_token,
+    get_tenant_by_api_key,
+    get_tenant_by_webhook_id,
+    get_today_realized_pnl,
+    hash_secret,
+    set_kill_switch,
+    update_risk_settings,
+    update_symbol_map,
+)
+from app.ws.manager import ConnectionManager
+from app.ws.relay_broker import WSRelayBroker
 
 logging.basicConfig(level="INFO")
 logger = logging.getLogger(__name__)
@@ -23,47 +34,40 @@ logger = logging.getLogger(__name__)
 async def lifespan(app: FastAPI):
     settings = get_settings()
     logging.getLogger().setLevel(settings.log_level)
+
     engine = make_engine(settings.database_url)
-    Base.metadata.create_all(engine)
+    await init_models(engine)
 
     app.state.settings = settings
+    app.state.engine = engine
     app.state.session_factory = make_session_factory(engine)
-    app.state.brokers = build_brokers(settings)
-    app.state.symbol_map = settings.load_symbol_map()
-    app.state.risk_manager = RiskManager(settings)
+    app.state.ws_manager = ConnectionManager()
 
-    logger.info(
-        "Started in %s mode with brokers=%s, %d symbols mapped",
-        settings.trading_mode,
-        list(app.state.brokers.keys()),
-        len(app.state.symbol_map),
-    )
+    logger.info("Started (database=%s)", settings.database_url.split("://")[0])
     yield
 
+    await engine.dispose()
 
-app = FastAPI(title="DataVeda Nifty Agent", lifespan=lifespan)
+
+app = FastAPI(title="DataVeda MT5 Bridge", lifespan=lifespan)
 
 
-def get_db(request: Request):
+async def get_db(request: Request):
     session_factory = request.app.state.session_factory
-    db = session_factory()
-    try:
-        yield db
-    finally:
-        db.close()
+    async with session_factory() as session:
+        yield session
 
 
-def _require_admin(x_admin_token: str = Header(default=""), settings: Settings = Depends(get_settings)) -> None:
-    # Personal-use agent: admin endpoints reuse the webhook passphrase as the
-    # admin token. Rotate WEBHOOK_PASSPHRASE if you suspect it has leaked.
-    if not passphrase_matches(x_admin_token, settings.webhook_passphrase):
-        raise HTTPException(status_code=401, detail="Invalid admin token")
-
-
-def _serialize_result(result) -> dict:
-    d = asdict(result)
-    d["status"] = result.status.value
-    return d
+async def get_current_tenant(
+    authorization: str = Header(default=""), db: AsyncSession = Depends(get_db)
+) -> Tenant:
+    if not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Missing or malformed Authorization header")
+    api_key = authorization.removeprefix("Bearer ").strip()
+    tenant = await get_tenant_by_api_key(db, api_key)
+    if tenant is None:
+        raise HTTPException(status_code=401, detail="Invalid API key")
+    return tenant
 
 
 @app.get("/health")
@@ -71,25 +75,101 @@ def health():
     return {"status": "ok"}
 
 
-@app.post("/webhook/tradingview")
-async def tradingview_webhook(request: Request, db: Session = Depends(get_db)):
-    settings: Settings = request.app.state.settings
-    client_ip = request.client.host if request.client else ""
+class SignupRequest(BaseModel):
+    email: EmailStr
 
-    if not ip_allowed(client_ip, settings.webhook_allowed_ips_list):
-        logger.warning("Rejected webhook from disallowed IP %s", client_ip)
-        raise HTTPException(status_code=403, detail="Source IP not allowed")
+
+@app.post("/signup")
+async def signup(payload: SignupRequest, db: AsyncSession = Depends(get_db)):
+    created = await create_tenant(db, payload.email)
+    if created is None:
+        raise HTTPException(status_code=409, detail="An account with this email already exists")
+    tenant, secrets_once = created
+
+    return {
+        "tenant_id": tenant.id,
+        "webhook_url": f"/webhook/tradingview/{secrets_once['webhook_id']}",
+        "api_key": secrets_once["api_key"],
+        "webhook_passphrase": secrets_once["webhook_passphrase"],
+        "agent_token": secrets_once["agent_token"],
+        "message": (
+            "Save these now - api_key, webhook_passphrase, and agent_token are shown only once. "
+            "Use api_key as a Bearer token for /me endpoints, webhook_passphrase in your TradingView "
+            "alert JSON, and agent_token to start your bridge agent (bridge_agent/agent.py)."
+        ),
+    }
+
+
+@app.get("/me")
+async def get_me(request: Request, tenant: Tenant = Depends(get_current_tenant), db: AsyncSession = Depends(get_db)):
+    return {
+        "tenant_id": tenant.id,
+        "email": tenant.email,
+        "webhook_url": f"/webhook/tradingview/{tenant.webhook_id}",
+        "symbol_map": tenant.symbol_map,
+        "risk_settings": tenant.risk_settings,
+        "plan": tenant.plan,
+        "kill_switch_engaged": tenant.kill_switch_engaged,
+        "kill_switch_reason": tenant.kill_switch_reason,
+        "bridge_agent_connected": request.app.state.ws_manager.is_connected(tenant.id),
+        "today_realized_pnl": await get_today_realized_pnl(db, tenant.id),
+    }
+
+
+class SymbolMapUpdate(BaseModel):
+    symbol_map: dict[str, str]
+
+
+@app.put("/me/symbol-map")
+async def put_symbol_map(
+    payload: SymbolMapUpdate, tenant: Tenant = Depends(get_current_tenant), db: AsyncSession = Depends(get_db)
+):
+    normalized = {k.strip().upper(): v.strip() for k, v in payload.symbol_map.items()}
+    tenant = await update_symbol_map(db, tenant, normalized)
+    return {"symbol_map": tenant.symbol_map}
+
+
+class RiskSettingsUpdate(BaseModel):
+    max_qty_per_order: float | None = None
+    max_daily_loss: float | None = None
+    allowed_symbols: list[str] | None = None
+
+
+@app.put("/me/risk-settings")
+async def put_risk_settings(
+    payload: RiskSettingsUpdate, tenant: Tenant = Depends(get_current_tenant), db: AsyncSession = Depends(get_db)
+):
+    current = dict(tenant.risk_settings or {})
+    updates = payload.model_dump(exclude_none=True)
+    current.update(updates)
+    tenant = await update_risk_settings(db, tenant, current)
+    return {"risk_settings": tenant.risk_settings}
+
+
+@app.post("/me/kill-switch")
+async def post_kill_switch(
+    engaged: bool, reason: str = "", tenant: Tenant = Depends(get_current_tenant), db: AsyncSession = Depends(get_db)
+):
+    tenant = await set_kill_switch(db, tenant, engaged, reason)
+    logger.warning("Tenant %s kill switch set to engaged=%s reason=%r", tenant.id, tenant.kill_switch_engaged, reason)
+    return {"engaged": tenant.kill_switch_engaged, "reason": tenant.kill_switch_reason}
+
+
+@app.post("/webhook/tradingview/{webhook_id}")
+async def tradingview_webhook(webhook_id: str, request: Request, db: AsyncSession = Depends(get_db)):
+    tenant = await get_tenant_by_webhook_id(db, webhook_id)
+    if tenant is None:
+        raise HTTPException(status_code=404, detail="Unknown webhook")
 
     try:
         raw = await request.json()
     except Exception as exc:
         raise HTTPException(status_code=400, detail="Invalid JSON body") from exc
-
     if not isinstance(raw, dict):
         raise HTTPException(status_code=400, detail="Body must be a JSON object")
 
-    if not passphrase_matches(str(raw.get("passphrase", "")), settings.webhook_passphrase):
-        logger.warning("Rejected webhook with invalid passphrase from %s", client_ip)
+    if not passphrase_matches(hash_secret(str(raw.get("passphrase", ""))), tenant.webhook_passphrase_hash):
+        logger.warning("Rejected webhook for tenant=%s: invalid passphrase", tenant.id)
         raise HTTPException(status_code=401, detail="Invalid passphrase")
 
     try:
@@ -97,38 +177,37 @@ async def tradingview_webhook(request: Request, db: Session = Depends(get_db)):
     except ValidationError as exc:
         raise HTTPException(status_code=422, detail=exc.errors()) from exc
 
-    results = process_signal(
-        signal,
-        settings,
-        request.app.state.brokers,
-        request.app.state.symbol_map,
-        db,
-        request.app.state.risk_manager,
-    )
+    settings: Settings = request.app.state.settings
+    broker = WSRelayBroker(request.app.state.ws_manager, tenant.id, timeout=settings.bridge_order_timeout_seconds)
+    result = await process_signal(signal, tenant, db, broker)
 
     return {
         "signal_id": signal.signal_id,
-        "trading_mode": settings.trading_mode,
-        "results": [_serialize_result(r) for r in results],
+        "status": result.status.value,
+        "broker_order_id": result.broker_order_id,
+        "message": result.message,
     }
 
 
-@app.get("/admin/status", dependencies=[Depends(_require_admin)])
-def admin_status(request: Request, db: Session = Depends(get_db)):
-    settings: Settings = request.app.state.settings
-    kill_switch = get_kill_switch(db)
-    return {
-        "trading_mode": settings.trading_mode,
-        "env_kill_switch": settings.kill_switch,
-        "runtime_kill_switch_engaged": kill_switch.engaged,
-        "runtime_kill_switch_reason": kill_switch.reason,
-        "today_realized_pnl": get_today_realized_pnl(db),
-        "enabled_brokers": list(request.app.state.brokers.keys()),
-    }
+@app.websocket("/agent/ws")
+async def agent_ws(websocket: WebSocket):
+    token = websocket.query_params.get("token", "")
+    session_factory = websocket.app.state.session_factory
+    async with session_factory() as db:
+        tenant = await get_tenant_by_agent_token(db, token)
 
+    if tenant is None:
+        await websocket.close(code=1008)
+        return
 
-@app.post("/admin/kill-switch", dependencies=[Depends(_require_admin)])
-def admin_kill_switch(engaged: bool, reason: str = "", db: Session = Depends(get_db)):
-    state = set_kill_switch(db, engaged, reason)
-    logger.warning("Runtime kill switch set to engaged=%s reason=%r", state.engaged, state.reason)
-    return {"engaged": state.engaged, "reason": state.reason}
+    manager: ConnectionManager = websocket.app.state.ws_manager
+    await manager.connect(tenant.id, websocket)
+    try:
+        while True:
+            message = await websocket.receive_json()
+            if message.get("type") == "order_result":
+                manager.resolve(message["request_id"], message)
+    except WebSocketDisconnect:
+        pass
+    finally:
+        manager.disconnect(tenant.id)

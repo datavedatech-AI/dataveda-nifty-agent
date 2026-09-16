@@ -1,8 +1,8 @@
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Optional
 
-from app.models.signal import OrderType, ProductType, SignalAction
+from app.models.signal import OrderType, SignalAction
 
 
 class OrderSide(str, Enum):
@@ -13,7 +13,6 @@ class OrderSide(str, Enum):
 class OrderStatus(str, Enum):
     ACCEPTED = "accepted"
     REJECTED = "rejected"
-    SIMULATED = "simulated"
     ERROR = "error"
 
 
@@ -24,14 +23,13 @@ class OrderRequest:
     signal_id: str
     symbol: str
     action: SignalAction
-    side: Optional[OrderSide]
+    side: OrderSide
     quantity: float
     order_type: OrderType
-    product_type: ProductType
+    mt5_symbol: str
     price: Optional[float] = None
     stop_loss: Optional[float] = None
     take_profit: Optional[float] = None
-    broker_symbol: dict = field(default_factory=dict)
 
 
 @dataclass

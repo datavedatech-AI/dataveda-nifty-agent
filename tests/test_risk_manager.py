@@ -1,22 +1,6 @@
-from app.config import Settings
 from app.models.signal import TradingViewSignal
-from app.risk.manager import RiskManager
-from app.storage.repository import log_trade, set_kill_switch
-from tests.fakes import FakeBroker
-
-
-def make_settings(**overrides) -> Settings:
-    base = dict(
-        WEBHOOK_PASSPHRASE="secret",
-        ENABLED_BROKERS="fake",
-        RISK_MAX_QTY_PER_ORDER=100,
-        RISK_MAX_OPEN_POSITIONS=5,
-        RISK_MAX_DAILY_LOSS=1000,
-        RISK_ALLOWED_SYMBOLS="",
-        KILL_SWITCH=False,
-    )
-    base.update(overrides)
-    return Settings(**base)
+from app.risk.manager import check_risk
+from app.storage.repository import create_tenant, log_trade
 
 
 def make_signal(**overrides) -> TradingViewSignal:
@@ -24,91 +8,93 @@ def make_signal(**overrides) -> TradingViewSignal:
         passphrase="secret",
         signal_id="sig-1",
         strategy="s1",
-        symbol="NIFTY",
+        symbol="EURUSD",
         action="buy",
-        quantity=50,
+        quantity=0.5,
     )
     base.update(overrides)
     return TradingViewSignal(**base)
 
 
-def test_allows_when_everything_ok(db_session):
-    settings = make_settings()
-    manager = RiskManager(settings)
-    result = manager.check(make_signal(), db_session, {"fake": FakeBroker()})
+async def _tenant(db_session, **risk_overrides):
+    tenant, _ = await create_tenant(db_session, f"user-{risk_overrides}@example.com")
+    # Reassign (don't mutate in place) - SQLAlchemy only tracks JSON columns
+    # as dirty on reassignment, not on mutating the dict it already holds.
+    tenant.risk_settings = {**tenant.risk_settings, **risk_overrides}
+    await db_session.commit()
+    await db_session.refresh(tenant)
+    return tenant
+
+
+async def test_allows_when_everything_ok(db_session):
+    tenant = await _tenant(db_session, max_qty_per_order=10)
+    result = await check_risk(tenant, make_signal(), db_session)
     assert result.allowed is True
 
 
-def test_env_kill_switch_blocks(db_session):
-    settings = make_settings(KILL_SWITCH=True)
-    manager = RiskManager(settings)
-    result = manager.check(make_signal(), db_session, {})
-    assert result.allowed is False
-    assert "Kill switch" in result.reason
+async def test_kill_switch_blocks(db_session):
+    tenant = await _tenant(db_session)
+    tenant.kill_switch_engaged = True
+    tenant.kill_switch_reason = "manual halt"
+    await db_session.commit()
 
-
-def test_runtime_kill_switch_blocks(db_session):
-    settings = make_settings()
-    set_kill_switch(db_session, True, "manual halt")
-    manager = RiskManager(settings)
-    result = manager.check(make_signal(), db_session, {})
+    result = await check_risk(tenant, make_signal(), db_session)
     assert result.allowed is False
     assert "manual halt" in result.reason
 
 
-def test_symbol_allowlist_blocks(db_session):
-    settings = make_settings(RISK_ALLOWED_SYMBOLS="BANKNIFTY")
-    manager = RiskManager(settings)
-    result = manager.check(make_signal(symbol="NIFTY"), db_session, {})
+async def test_symbol_allowlist_blocks(db_session):
+    tenant = await _tenant(db_session, allowed_symbols=["GBPUSD"])
+    result = await check_risk(tenant, make_signal(symbol="EURUSD"), db_session)
     assert result.allowed is False
-    assert "not in RISK_ALLOWED_SYMBOLS" in result.reason
+    assert "not in this account's allowed_symbols" in result.reason
 
 
-def test_max_qty_blocks(db_session):
-    settings = make_settings(RISK_MAX_QTY_PER_ORDER=10)
-    manager = RiskManager(settings)
-    result = manager.check(make_signal(quantity=50), db_session, {})
+async def test_max_qty_blocks(db_session):
+    tenant = await _tenant(db_session, max_qty_per_order=0.1)
+    result = await check_risk(tenant, make_signal(quantity=0.5), db_session)
     assert result.allowed is False
-    assert "exceeds RISK_MAX_QTY_PER_ORDER" in result.reason
+    assert "exceeds max_qty_per_order" in result.reason
 
 
-def test_daily_loss_circuit_breaker_blocks(db_session):
-    settings = make_settings(RISK_MAX_DAILY_LOSS=500)
-    entry = log_trade(
+async def test_daily_loss_circuit_breaker_blocks(db_session):
+    tenant = await _tenant(db_session, max_daily_loss=500)
+    entry = await log_trade(
         db_session,
+        tenant_id=tenant.id,
         signal_id="loss-1",
         strategy="s1",
-        symbol="NIFTY",
+        symbol="EURUSD",
         action="sell",
         side="sell",
-        quantity=75,
-        broker="fake",
+        quantity=0.5,
         status="accepted",
     )
     entry.realized_pnl = -600
-    db_session.commit()
+    await db_session.commit()
 
-    manager = RiskManager(settings)
-    result = manager.check(make_signal(), db_session, {})
+    result = await check_risk(tenant, make_signal(), db_session)
     assert result.allowed is False
     assert "Daily loss circuit breaker" in result.reason
 
 
-def test_max_open_positions_blocks(db_session):
-    settings = make_settings(RISK_MAX_OPEN_POSITIONS=1)
-    broker = FakeBroker(positions=[{"symbol": "NIFTY"}, {"symbol": "BANKNIFTY"}])
-    manager = RiskManager(settings)
-    result = manager.check(make_signal(), db_session, {"fake": broker})
-    assert result.allowed is False
-    assert "RISK_MAX_OPEN_POSITIONS" in result.reason
+async def test_daily_loss_only_counts_this_tenant(db_session):
+    tenant_a = await _tenant(db_session, max_daily_loss=500)
+    tenant_b, _ = await create_tenant(db_session, "other@example.com")
 
+    entry = await log_trade(
+        db_session,
+        tenant_id=tenant_b.id,
+        signal_id="loss-b",
+        strategy="s1",
+        symbol="EURUSD",
+        action="sell",
+        side="sell",
+        quantity=0.5,
+        status="accepted",
+    )
+    entry.realized_pnl = -9000
+    await db_session.commit()
 
-def test_broker_position_lookup_failure_does_not_crash(db_session):
-    class BrokenBroker(FakeBroker):
-        def get_open_positions(self):
-            raise RuntimeError("network down")
-
-    settings = make_settings()
-    manager = RiskManager(settings)
-    result = manager.check(make_signal(), db_session, {"fake": BrokenBroker()})
+    result = await check_risk(tenant_a, make_signal(), db_session)
     assert result.allowed is True

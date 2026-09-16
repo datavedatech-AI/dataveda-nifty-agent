@@ -1,11 +1,29 @@
 services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: dataveda
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme}
+      POSTGRES_DB: dataveda
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U dataveda"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
   agent:
     build: .
     ports:
       - "8000:8000"
-    env_file:
-      - .env
-    volumes:
-      - ./data:/app/data
-      - ./symbol_map.json:/app/symbol_map.json:ro
+    environment:
+      DATABASE_URL: postgresql+asyncpg://dataveda:${POSTGRES_PASSWORD:-changeme}@db:5432/dataveda
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    depends_on:
+      db:
+        condition: service_healthy
     restart: unless-stopped
+
+volumes:
+  pgdata:

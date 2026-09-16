@@ -1,8 +1,20 @@
 # TradingView alert setup
 
-The agent expects a JSON body on every alert. TradingView lets you build
-that JSON in the alert's "Message" box using placeholders that get filled
-in when the alert fires.
+## 0. Sign up first
+
+```
+POST /signup   {"email": "you@example.com"}
+```
+
+Save the response - `webhook_url`, `webhook_passphrase`, and `agent_token` are
+shown exactly once and can't be retrieved again. Then:
+
+1. Map your symbols: `PUT /me/symbol-map` with `Authorization: Bearer <api_key>`,
+   body `{"symbol_map": {"EURUSD": "EURUSD"}}` (TradingView symbol -> your
+   broker's MT5 symbol name - check MT5's Market Watch, names often have
+   suffixes like `EURUSD.a`).
+2. Start your bridge agent on the Windows machine with your MT5 terminal:
+   `python bridge_agent/agent.py --server wss://<your-domain>/agent/ws --token <agent_token>`
 
 ## 1. Minimal Pine Script strategy with alertcondition
 
@@ -28,38 +40,28 @@ if shortCondition
     alert('{"action":"close_long"}', alert.freq_once_per_bar_close)
 ```
 
-`alert()` calls fire independently of the "Create Alert" dialog and let you
-vary the JSON per condition, which is the recommended approach.
-
 ## 2. Alert message template
-
-When creating the alert (or as the fixed message for a `strategy.entry`
-based alert), use this JSON, filling in TradingView's built-in placeholders:
 
 ```json
 {
   "passphrase": "REPLACE_WITH_YOUR_WEBHOOK_PASSPHRASE",
   "signal_id": "{{ticker}}-{{interval}}-{{time}}",
   "strategy": "my_ema_cross",
-  "symbol": "NIFTY",
+  "symbol": "EURUSD",
   "action": "buy",
-  "quantity": 75,
-  "order_type": "market",
-  "product_type": "intraday",
-  "broker": "any"
+  "quantity": 0.1,
+  "order_type": "market"
 }
 ```
 
-- `passphrase` - must exactly match `WEBHOOK_PASSPHRASE` in your `.env`.
+- `passphrase` - must exactly match the `webhook_passphrase` from your signup response.
 - `signal_id` - MUST be unique per alert firing. `{{time}}` (bar close time)
   combined with `{{ticker}}` and `{{interval}}` is a reliable choice. This is
   what lets the agent safely ignore TradingView's automatic retry of a
   webhook delivery instead of double-placing the order.
-- `action` - one of `buy`, `sell`, `close_long`, `close_short`, `close_all`.
-- `symbol` - must exist as a key in `symbol_map.json` for whichever broker(s)
-  you want this signal routed to.
-- `broker` - `"any"` (all enabled brokers with a mapping for this symbol),
-  or a specific broker name (`"dhan"` / `"mt5"`) to restrict routing.
+- `action` - one of `buy`, `sell`, `close_long`, `close_short`. (`close_all`
+  isn't supported yet - use `close_long`/`close_short` with an explicit quantity.)
+- `symbol` - must be a key in your account's symbol map (`PUT /me/symbol-map`).
 
 For a limit order, add `"order_type": "limit"` and `"price": {{close}}` (or
 another TradingView placeholder).
@@ -69,10 +71,11 @@ another TradingView placeholder).
 Point the alert's webhook URL at:
 
 ```
-https://<your-domain-or-ip>/webhook/tradingview
+https://<your-domain>/webhook/tradingview/<your-webhook-id>
 ```
 
-TradingView requires HTTPS for webhooks (except on paid plans testing
-against `localhost` via their desktop app), so put the agent behind a
-reverse proxy with TLS (Caddy, nginx + certbot, or a managed load balancer)
-when deploying to a VPS.
+(the full path, including the ID, is in your signup response as `webhook_url`).
+
+TradingView requires HTTPS for webhooks, so the server needs a reverse
+proxy with TLS (Caddy, nginx + certbot, or a managed load balancer) in
+front of it.

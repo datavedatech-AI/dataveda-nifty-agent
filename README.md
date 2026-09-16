@@ -1,209 +1,172 @@
-# DataVeda Nifty Agent
+# DataVeda MT5 Bridge
 
-An agent that receives strategy signals from TradingView (via webhook
-alerts) and executes trades on DHAN and/or MetaTrader 5, through a common
-broker-adapter interface so more brokers can be added later without
-touching the core pipeline.
+A multi-tenant service that relays TradingView strategy alerts to each
+customer's own MetaTrader 5 account, over a low-latency WebSocket bridge -
+no inbound ports or public IP required on the customer's machine.
 
 ```
-TradingView alert (webhook) --> FastAPI endpoint --> auth + risk checks --> order router --> broker adapter(s) --> DHAN / MT5
-                                                            |
-                                                       SQLite trade log
-                                                    (idempotency + audit trail)
+TradingView alert (webhook)
+        |
+        v
+ POST /webhook/tradingview/{webhook_id}  --auth: passphrase-->  tenant lookup
+        |
+        v
+   idempotency + risk checks (DB, tenant-scoped)
+        |
+        v
+   WebSocket relay  ---- live outbound connection ---->  customer's bridge_agent.py
+        |                                                (runs next to their MT5 terminal)
+        v                                                       |
+   awaits agent's reply (few ms - seconds)  <---- order placed, result sent back
+        |
+        v
+   HTTP response + trade log entry
 ```
 
-## ⚠️ Live trading is enabled by default
+## Why WebSocket, not a webhook the server calls on the customer's machine
 
-`TRADING_MODE=live` in `.env.example` — as soon as you configure real
-broker credentials and start the agent, incoming signals place real orders
-with real money. Set `TRADING_MODE=paper` while testing; paper mode
-validates and logs every signal exactly like live mode but never calls a
-broker. There's also a runtime kill switch (`POST /admin/kill-switch`) to
-halt trading instantly without restarting the container, and a
-`KILL_SWITCH=true` env var for a hard stop at startup.
+An earlier single-tenant version of this had the server call an HTTP URL
+the customer exposed. That meant per-order TCP+TLS handshakes, and every
+customer needing a public IP / open port / dynamic-DNS setup - a nonstarter
+for a hosted product with non-technical customers. Here, the customer's
+bridge agent makes one **outbound** WebSocket connection and holds it open;
+orders are pushed down that live socket the instant a signal arrives.
 
 ## Project layout
 
 ```
 app/
-  config.py            Settings loaded from .env
-  main.py              FastAPI app: /webhook/tradingview, /admin/*, /health
-  models/              Pydantic signal schema + internal order dataclasses
-  brokers/
-    base.py            BrokerAdapter interface every broker implements
-    dhan.py             DHAN HQ REST API v2 adapter
-    mt5.py              MetaTrader 5 adapter (direct or HTTP-bridge mode)
-    registry.py         Builds enabled broker instances from config
-  mt5_core.py           Actual MetaTrader5 package calls (Windows-only)
-  mt5_bridge/server.py  Standalone bridge server to run on a Windows host
-  risk/manager.py       Kill switch, symbol allowlist, qty/loss/position caps
-  services/order_router.py  Idempotency, action->side/qty resolution, fan-out
-  security/auth.py      Passphrase + IP-allowlist checks
-  storage/               SQLite trade log + kill-switch state
+  config.py             Server-wide settings (DATABASE_URL, log level, bridge timeout)
+  main.py                FastAPI app: /signup, /me/*, /webhook/tradingview/{id}, /agent/ws, /health
+  models/                 Pydantic signal schema + internal order dataclasses
+  brokers/base.py         Async BrokerAdapter interface
+  ws/
+    manager.py             ConnectionManager: tracks each tenant's live agent
+                            connection, correlates order requests with replies
+    relay_broker.py         BrokerAdapter implementation over the WS relay
+  risk/manager.py         Kill switch, symbol allowlist, qty/daily-loss caps (tenant-scoped)
+  services/order_router.py Idempotency, action->side/qty resolution, dispatch
+  storage/                 Tenant + TradeLog models, async SQLAlchemy repository
+bridge_agent/agent.py     Self-contained script customers run next to their MT5 terminal
 pine/example_strategy_alert.md   Pine Script + alert JSON template
-tests/                  pytest suite (40 tests, all broker calls mocked)
+tests/                    pytest suite (async, WS round-trip tested end-to-end)
 ```
 
-## Quickstart (paper mode, local)
+## Quickstart (local dev)
 
 ```bash
 python3 -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt
+pip install -r requirements-dev.txt
 
 cp .env.example .env
-# edit .env: set WEBHOOK_PASSPHRASE, set TRADING_MODE=paper for now
-
-cp symbol_map.example.json symbol_map.json
-# edit symbol_map.json: map the symbols your strategy trades to real
-# broker instrument IDs (DHAN security_id, MT5 symbol name)
+# for local dev, DATABASE_URL=sqlite+aiosqlite:///./data/tenants.db is fine -
+# Postgres is recommended once you're past solo testing
 
 uvicorn app.main:app --reload
 ```
 
-Send a test signal:
+Sign up and configure an account:
 
 ```bash
-curl -X POST http://localhost:8000/webhook/tradingview \
-  -H "Content-Type: application/json" \
-  -d '{
-    "passphrase": "your-webhook-passphrase",
-    "signal_id": "test-1",
-    "strategy": "manual_test",
-    "symbol": "NIFTY",
-    "action": "buy",
-    "quantity": 75
-  }'
+curl -X POST http://localhost:8000/signup -H "Content-Type: application/json" \
+  -d '{"email": "you@example.com"}'
+# save api_key, webhook_url, webhook_passphrase, agent_token from the response - shown once
+
+curl -X PUT http://localhost:8000/me/symbol-map \
+  -H "Authorization: Bearer <api_key>" -H "Content-Type: application/json" \
+  -d '{"symbol_map": {"EURUSD": "EURUSD"}}'
+```
+
+Start the bridge agent (on the machine with your MT5 terminal):
+
+```bash
+pip install -r requirements-bridge-agent.txt
+python bridge_agent/agent.py --server ws://localhost:8000/agent/ws --token <agent_token>
+```
+
+Fire a test signal (see `pine/example_strategy_alert.md` for the full
+TradingView alert setup):
+
+```bash
+curl -X POST http://localhost:8000<webhook_url> -H "Content-Type: application/json" \
+  -d '{"passphrase": "<webhook_passphrase>", "signal_id": "test-1", "strategy": "manual_test", "symbol": "EURUSD", "action": "buy", "quantity": 0.1}'
 ```
 
 Run the tests:
 
 ```bash
-pip install pytest
 pytest -q
 ```
 
-## Configuring TradingView
+## API summary
 
-See `pine/example_strategy_alert.md` for the Pine Script `alert()` pattern
-and the JSON payload TradingView should POST. Key points:
-
-- Every payload must include `"passphrase"` matching `WEBHOOK_PASSPHRASE`.
-- Every payload must include a unique `"signal_id"` (e.g. built from
-  `{{ticker}}-{{interval}}-{{time}}`) — this is how retried/duplicate
-  webhook deliveries are safely ignored instead of double-executing.
-- `"symbol"` must be a key in `symbol_map.json`.
-- TradingView requires HTTPS webhook URLs, so put a reverse proxy with TLS
-  (Caddy, nginx+certbot, a cloud load balancer) in front of the container
-  when deployed.
-
-## DHAN setup
-
-1. Generate an access token from the DHAN web app: My Profile > DhanHQ
-   Trading APIs.
-2. Set `DHAN_CLIENT_ID` and `DHAN_ACCESS_TOKEN` in `.env`.
-3. In `symbol_map.json`, map each symbol to DHAN's `security_id` and
-   `exchange_segment` (e.g. `NSE_EQ`, `NSE_FNO`, `IDX_I`). Look these up via
-   DHAN's instrument master CSV/API — they are not the same as the trading
-   symbol string.
-
-## MetaTrader 5 setup
-
-The `MetaTrader5` Python package only works on Windows, because it talks to
-a locally running MT5 terminal. Two deployment options:
-
-**Direct mode** (`MT5_MODE=direct`) — run the whole agent (this FastAPI
-app) on a Windows host/VM/VPS with the MT5 terminal installed and logged
-in. Install `requirements-mt5.txt` in addition to `requirements.txt`.
-
-**Bridge mode** (`MT5_MODE=bridge`, recommended for the Dockerized/Linux
-deployment) — run the main agent in Docker on Linux as normal, and run
-`app/mt5_bridge/server.py` separately on a Windows host with the MT5
-terminal:
-
-```powershell
-pip install -r requirements-mt5-bridge.txt
-set MT5_LOGIN=12345678
-set MT5_PASSWORD=your-password
-set MT5_SERVER=YourBroker-Server
-uvicorn app.mt5_bridge.server:app --host 0.0.0.0 --port 8811
-```
-
-Then in the main agent's `.env`:
-
-```
-MT5_MODE=bridge
-MT5_BRIDGE_URL=http://<windows-host-ip>:8811
-```
-
-The bridge has no authentication of its own — only expose it on a private
-network or VPN between the two hosts, never on the public internet.
-
-In `symbol_map.json`, map each symbol to the exact MT5 symbol name your
-broker uses (check MT5's Market Watch — names often have suffixes like
-`EURUSD.a`).
+| Endpoint | Auth | Purpose |
+|---|---|---|
+| `POST /signup` | none | Create an account, get `api_key`/`webhook_url`/`webhook_passphrase`/`agent_token` (shown once) |
+| `GET /me` | Bearer api_key | Account status, symbol map, risk settings, bridge agent connection state |
+| `PUT /me/symbol-map` | Bearer api_key | Set TradingView-symbol -> MT5-symbol mapping |
+| `PUT /me/risk-settings` | Bearer api_key | Set `max_qty_per_order`, `max_daily_loss`, `allowed_symbols` |
+| `POST /me/kill-switch` | Bearer api_key | Halt this account's trading instantly (`?engaged=true&reason=...`) |
+| `POST /webhook/tradingview/{webhook_id}` | passphrase in body | TradingView alerts land here |
+| `WS /agent/ws?token=<agent_token>` | agent_token | The bridge agent's persistent connection |
+| `GET /health` | none | Liveness check |
 
 ## Risk management
 
-Configured via `.env`:
+Per-tenant, set via `PUT /me/risk-settings`:
 
 | Setting | Purpose |
 |---|---|
-| `RISK_ALLOWED_SYMBOLS` | Only these symbols can be traded (empty = no restriction) |
-| `RISK_MAX_QTY_PER_ORDER` | Hard cap on quantity/lots per signal |
-| `RISK_MAX_OPEN_POSITIONS` | Blocks new entries once a broker has this many open positions |
-| `RISK_MAX_DAILY_LOSS` | Circuit breaker: blocks all trading once today's realized loss (tracked in the trade log) reaches this |
-| `KILL_SWITCH` | Hard stop at startup |
+| `allowed_symbols` | Only these symbols can be traded (empty = no restriction) |
+| `max_qty_per_order` | Hard cap on quantity/lots per signal |
+| `max_daily_loss` | Circuit breaker: blocks trading once today's realized loss (from `TradeLog.realized_pnl`) reaches this |
 
-Realized PnL isn't computed automatically (that needs broker-specific trade
-reconciliation) — record it via the DB (`TradeLog.realized_pnl`) as you
-extend the reconciliation logic, or wire up a periodic job that pulls it
-from each broker's trade book.
+Realized PnL isn't computed automatically yet - it needs broker-side trade
+reconciliation, which is a natural next addition.
 
-Runtime kill switch (no restart needed):
-
-```bash
-curl -X POST "http://localhost:8000/admin/kill-switch?engaged=true&reason=manual+halt" \
-  -H "X-Admin-Token: your-webhook-passphrase"
-
-curl "http://localhost:8000/admin/status" -H "X-Admin-Token: your-webhook-passphrase"
-```
-
-(Admin endpoints reuse `WEBHOOK_PASSPHRASE` as the token since this is a
-personal-use agent — rotate it if you suspect it's leaked.)
-
-## Adding a new broker
-
-1. Create `app/brokers/<broker>.py` implementing `BrokerAdapter`
-   (`place_order`, `get_open_positions`, `get_account_summary`, and
-   optionally `get_signed_position_qty` to support `close_all` signals).
-2. Add one branch to `build_brokers()` in `app/brokers/registry.py`.
-3. Add `<broker>` to `ENABLED_BROKERS` and map symbols to it in
-   `symbol_map.json`.
-
-Nothing else in the pipeline (risk manager, order router, webhook handler)
-needs to change.
+The kill switch (`POST /me/kill-switch`) takes effect immediately, no
+restart needed - useful for halting a runaway strategy mid-session.
 
 ## Docker deployment
 
 ```bash
-cp .env.example .env   # fill in real values
-cp symbol_map.example.json symbol_map.json
+cp .env.example .env   # set POSTGRES_PASSWORD at minimum
 docker compose up -d --build
 ```
 
-This runs the Linux-only parts (webhook, risk manager, order router, DHAN
-adapter, MT5 adapter in bridge mode). Put a TLS-terminating reverse proxy
-in front of it for the public HTTPS endpoint TradingView requires. If using
-MT5, run `app/mt5_bridge/server.py` separately on a Windows host as
-described above.
+This runs the server + Postgres. Put a TLS-terminating reverse proxy in
+front of it for the public HTTPS endpoint TradingView requires (webhooks)
+and the `wss://` endpoint bridge agents connect to. The bridge agent itself
+is never part of this deployment - customers run it themselves via
+`requirements-bridge-agent.txt`.
 
-## Limitations / things to extend before relying on this for real capital
+## Latency notes
 
-- No automatic PnL reconciliation from broker trade books — the daily-loss
-  circuit breaker only sees PnL you (or a job you add) record explicitly.
-- No slippage/partial-fill handling beyond what each broker's API reports
-  synchronously on order placement.
-- The MT5 bridge has no auth — restrict it at the network level.
-- `close_all` position lookup depends on each adapter's
-  `get_signed_position_qty`; verify it against your broker's actual
-  position payload shape before relying on it live.
+- The WebSocket relay avoids per-order handshakes: one persistent
+  connection per tenant, an order is a single JSON frame down it.
+- The hot path per signal is: one idempotency-reservation write, 1-2
+  indexed risk-check reads, one WS round trip, one result write - no
+  synchronous calls to anything except the tenant's own bridge agent.
+- For lowest latency, advise customers to run `bridge_agent.py` on a VPS
+  close to their broker's trade server (many forex brokers publish
+  recommended low-latency VPS locations) rather than a home PC.
+- `get_open_positions()` is not fetched live over the relay (see
+  `WSRelayBroker`) - each such call would add a round trip to every
+  signal's hot path. `close_all` is unsupported for the same reason; use
+  `close_long`/`close_short` with an explicit quantity instead.
+- `ConnectionManager` is in-memory and single-process. Scaling to multiple
+  server instances needs a shared layer (e.g. Redis pub/sub) so an order
+  for a tenant connected to instance A can be routed from instance B -
+  noted as a known next step, not yet built.
+
+## What's deliberately not built yet
+
+- **Web dashboard.** Everything above is JSON API + curl. A UI (signup,
+  symbol map editor, live trade log, kill switch) is a natural next step
+  once the core pipeline is proven.
+- **Billing.** No Stripe integration; `plan` exists on the Tenant model as
+  a placeholder.
+- **Multi-broker.** MT5-only by design (see the SEBI/regulatory discussion
+  this pivot came out of) - a DHAN adapter existed in an earlier version
+  and can be reintroduced as an async adapter later.
+- **Horizontal scaling of the WS relay** (see Latency notes above).

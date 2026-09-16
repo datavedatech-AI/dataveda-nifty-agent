@@ -1,23 +1,18 @@
 import logging
 
-from sqlalchemy.orm import Session
+from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.brokers.base import BrokerAdapter
-from app.config import Settings
 from app.models.order import OrderRequest, OrderResult, OrderSide, OrderStatus
 from app.models.signal import SignalAction, TradingViewSignal
-from app.risk.manager import RiskManager
+from app.risk.manager import check_risk
+from app.storage.models import Tenant
 from app.storage.repository import finalize_signal_log, log_trade, try_reserve_signal
+from app.ws.relay_broker import WSRelayBroker
 
 logger = logging.getLogger(__name__)
 
 
-def _side_and_quantity(
-    signal: TradingViewSignal, broker_name: str, broker: BrokerAdapter, mapping: dict
-) -> tuple[OrderSide, float] | None:
-    """Translate a signal action into a concrete (side, quantity) for one broker.
-    Returns None if there's nothing to do (e.g. close requested but no position exists).
-    """
+def _side_and_quantity(signal: TradingViewSignal) -> tuple[OrderSide, float] | None:
     if signal.action == SignalAction.BUY:
         return OrderSide.BUY, signal.quantity
     if signal.action == SignalAction.SELL:
@@ -26,30 +21,24 @@ def _side_and_quantity(
         return OrderSide.SELL, signal.quantity
     if signal.action == SignalAction.CLOSE_SHORT:
         return OrderSide.BUY, signal.quantity
-
-    if signal.action == SignalAction.CLOSE_ALL:
-        try:
-            qty = broker.get_signed_position_qty(mapping)
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("Could not fetch positions from %s to resolve close_all: %s", broker_name, exc)
-            return None
-        if not qty:
-            return None
-        return (OrderSide.SELL, abs(qty)) if qty > 0 else (OrderSide.BUY, abs(qty))
-
+    # close_all needs a live position lookup, which this MVP doesn't fetch
+    # over the relay (see WSRelayBroker.get_open_positions). Use
+    # close_long/close_short with an explicit quantity instead.
     return None
 
 
-def process_signal(
-    signal: TradingViewSignal,
-    settings: Settings,
-    brokers: dict[str, BrokerAdapter],
-    symbol_map: dict,
-    session: Session,
-    risk_manager: RiskManager,
-) -> list[OrderResult]:
-    reservation = try_reserve_signal(
+async def process_signal(
+    signal: TradingViewSignal, tenant: Tenant, session: AsyncSession, broker: WSRelayBroker
+) -> OrderResult:
+    # Captured before any DB call that might roll back: try_reserve_signal
+    # rolls back on a duplicate signal_id, which expires every ORM object
+    # loaded in this session (including `tenant`) - touching tenant.* after
+    # that without a fresh await would crash with a MissingGreenlet error.
+    tenant_id = tenant.id
+
+    reservation = await try_reserve_signal(
         session,
+        tenant_id=tenant_id,
         signal_id=signal.signal_id,
         strategy=signal.strategy,
         symbol=signal.symbol,
@@ -57,98 +46,56 @@ def process_signal(
         quantity=signal.quantity,
     )
     if reservation is None:
-        logger.info("Duplicate signal_id=%s ignored", signal.signal_id)
-        return [OrderResult(broker="*", status=OrderStatus.REJECTED, message="Duplicate signal_id, already processed")]
+        logger.info("Duplicate signal_id=%s for tenant=%s ignored", signal.signal_id, tenant_id)
+        return OrderResult(broker="mt5", status=OrderStatus.REJECTED, message="Duplicate signal_id, already processed")
 
-    risk_result = risk_manager.check(signal, session, brokers)
+    risk_result = await check_risk(tenant, signal, session)
     if not risk_result.allowed:
-        logger.warning("Signal %s rejected by risk manager: %s", signal.signal_id, risk_result.reason)
-        finalize_signal_log(session, reservation, OrderStatus.REJECTED.value, f"Risk check failed: {risk_result.reason}")
-        return [OrderResult(broker="*", status=OrderStatus.REJECTED, message=risk_result.reason)]
+        logger.warning("Signal %s (tenant=%s) rejected by risk manager: %s", signal.signal_id, tenant.id, risk_result.reason)
+        await finalize_signal_log(session, reservation, OrderStatus.REJECTED.value, f"Risk check failed: {risk_result.reason}")
+        return OrderResult(broker="mt5", status=OrderStatus.REJECTED, message=risk_result.reason)
 
-    symbol_mapping = symbol_map.get(signal.symbol, {})
-    if signal.broker == "any":
-        target_broker_names = [name for name in brokers if name in symbol_mapping]
-    else:
-        target_broker_names = [signal.broker] if signal.broker in brokers else []
+    mt5_symbol = (tenant.symbol_map or {}).get(signal.symbol)
+    if not mt5_symbol:
+        message = f"No MT5 symbol mapped for {signal.symbol} - add it via PUT /me/symbol-map"
+        await finalize_signal_log(session, reservation, OrderStatus.REJECTED.value, message)
+        return OrderResult(broker="mt5", status=OrderStatus.REJECTED, message=message)
 
-    if not target_broker_names:
-        message = f"No enabled broker has a symbol mapping for {signal.symbol} (requested broker={signal.broker!r})"
-        logger.warning(message)
-        finalize_signal_log(session, reservation, OrderStatus.REJECTED.value, message)
-        return [OrderResult(broker="*", status=OrderStatus.REJECTED, message=message)]
+    resolved = _side_and_quantity(signal)
+    if resolved is None:
+        message = "close_all is not supported yet - use close_long/close_short with an explicit quantity"
+        await finalize_signal_log(session, reservation, OrderStatus.REJECTED.value, message)
+        return OrderResult(broker="mt5", status=OrderStatus.REJECTED, message=message)
+    side, quantity = resolved
 
-    results: list[OrderResult] = []
-    for broker_name in target_broker_names:
-        broker = brokers[broker_name]
-        mapping = symbol_mapping.get(broker_name, {})
-
-        resolved = _side_and_quantity(signal, broker_name, broker, mapping)
-        if resolved is None:
-            result = OrderResult(broker=broker_name, status=OrderStatus.REJECTED, message="Nothing to close / no position found")
-            results.append(result)
-            log_trade(
-                session,
-                signal_id=f"{signal.signal_id}:{broker_name}",
-                strategy=signal.strategy,
-                symbol=signal.symbol,
-                action=signal.action.value,
-                side=None,
-                quantity=signal.quantity,
-                broker=broker_name,
-                status=result.status.value,
-                message=result.message,
-            )
-            continue
-
-        side, quantity = resolved
-        order_request = OrderRequest(
-            signal_id=signal.signal_id,
-            symbol=signal.symbol,
-            action=signal.action,
-            side=side,
-            quantity=quantity,
-            order_type=signal.order_type,
-            product_type=signal.product_type,
-            price=signal.price,
-            stop_loss=signal.stop_loss,
-            take_profit=signal.take_profit,
-            broker_symbol=symbol_mapping,
-        )
-
-        if settings.trading_mode == "paper":
-            result = OrderResult(
-                broker=broker_name,
-                status=OrderStatus.SIMULATED,
-                message=f"PAPER MODE: would have placed {side.value} {quantity} {signal.symbol} on {broker_name}",
-            )
-        else:
-            try:
-                result = broker.place_order(order_request)
-            except Exception as exc:  # noqa: BLE001 - never let a broker bug crash the whole batch
-                logger.exception("Broker %s raised while placing order for signal %s", broker_name, signal.signal_id)
-                result = OrderResult(broker=broker_name, status=OrderStatus.ERROR, message=str(exc))
-
-        results.append(result)
-        log_trade(
-            session,
-            signal_id=f"{signal.signal_id}:{broker_name}",
-            strategy=signal.strategy,
-            symbol=signal.symbol,
-            action=signal.action.value,
-            side=side.value,
-            quantity=quantity,
-            broker=broker_name,
-            status=result.status.value,
-            message=result.message,
-            broker_order_id=result.broker_order_id,
-        )
-
-    finalize_signal_log(
-        session,
-        reservation,
-        status="dispatched",
-        message=f"Fanned out to {len(target_broker_names)} broker(s): {', '.join(target_broker_names)}",
+    order_request = OrderRequest(
+        signal_id=signal.signal_id,
+        symbol=signal.symbol,
+        action=signal.action,
+        side=side,
+        quantity=quantity,
+        order_type=signal.order_type,
+        mt5_symbol=mt5_symbol,
+        price=signal.price,
+        stop_loss=signal.stop_loss,
+        take_profit=signal.take_profit,
     )
 
-    return results
+    result = await broker.place_order(order_request)
+
+    await log_trade(
+        session,
+        tenant_id=tenant.id,
+        signal_id=f"{signal.signal_id}:mt5",
+        strategy=signal.strategy,
+        symbol=signal.symbol,
+        action=signal.action.value,
+        side=side.value,
+        quantity=quantity,
+        status=result.status.value,
+        message=result.message,
+        broker_order_id=result.broker_order_id,
+    )
+    await finalize_signal_log(session, reservation, "dispatched", f"Routed to MT5: {result.status.value}")
+
+    return result

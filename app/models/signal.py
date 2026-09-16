@@ -17,29 +17,19 @@ class OrderType(str, Enum):
     LIMIT = "limit"
 
 
-class ProductType(str, Enum):
-    INTRADAY = "intraday"
-    DELIVERY = "delivery"
-    MARGIN = "margin"
-
-
 class TradingViewSignal(BaseModel):
-    """Shape of the JSON body a TradingView alert() posts to our webhook.
+    """Shape of the JSON body a TradingView alert() posts to
+    /webhook/tradingview/{webhook_id}.
 
-    Pine Script alert message example (see pine/example_strategy_alert.md):
+    Example:
       {
-        "passphrase": "{{strategy.order.alert_message}}",
-        "signal_id": "{{ticker}}-{{time}}-{{strategy.order.id}}",
+        "passphrase": "...",
+        "signal_id": "{{ticker}}-{{interval}}-{{time}}",
         "strategy": "my_ema_cross",
-        "symbol": "NIFTY",
+        "symbol": "EURUSD",
         "action": "buy",
-        "quantity": 75,
-        "order_type": "market",
-        "product_type": "intraday",
-        "price": 0,
-        "stop_loss": 0,
-        "take_profit": 0,
-        "broker": "any"
+        "quantity": 0.1,
+        "order_type": "market"
       }
     """
 
@@ -50,11 +40,9 @@ class TradingViewSignal(BaseModel):
     action: SignalAction
     quantity: float = Field(gt=0)
     order_type: OrderType = OrderType.MARKET
-    product_type: ProductType = ProductType.INTRADAY
     price: Optional[float] = Field(default=None, description="Required for limit orders")
     stop_loss: Optional[float] = None
     take_profit: Optional[float] = None
-    broker: str = Field(default="any", description="'any' (all enabled brokers), or a specific broker name")
 
     @field_validator("symbol")
     @classmethod

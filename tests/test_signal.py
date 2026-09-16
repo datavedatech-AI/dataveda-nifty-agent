@@ -9,9 +9,9 @@ def _base_payload(**overrides):
         "passphrase": "x",
         "signal_id": "abc-1",
         "strategy": "ema_cross",
-        "symbol": "nifty",
+        "symbol": "eurusd",
         "action": "buy",
-        "quantity": 75,
+        "quantity": 0.1,
     }
     payload.update(overrides)
     return payload
@@ -19,13 +19,12 @@ def _base_payload(**overrides):
 
 def test_symbol_is_uppercased():
     signal = TradingViewSignal(**_base_payload())
-    assert signal.symbol == "NIFTY"
+    assert signal.symbol == "EURUSD"
 
 
 def test_defaults():
     signal = TradingViewSignal(**_base_payload())
     assert signal.order_type == OrderType.MARKET
-    assert signal.broker == "any"
     assert signal.action == SignalAction.BUY
 
 
@@ -40,8 +39,8 @@ def test_limit_order_requires_price():
 
 
 def test_limit_order_with_price_ok():
-    signal = TradingViewSignal(**_base_payload(order_type="limit", price=100.5))
-    assert signal.price == 100.5
+    signal = TradingViewSignal(**_base_payload(order_type="limit", price=1.085))
+    assert signal.price == 1.085
 
 
 def test_invalid_action_rejected():

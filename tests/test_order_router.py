@@ -1,19 +1,8 @@
-from app.config import Settings
 from app.models.order import OrderStatus
 from app.models.signal import TradingViewSignal
-from app.risk.manager import RiskManager
 from app.services.order_router import process_signal
+from app.storage.repository import create_tenant
 from tests.fakes import FakeBroker
-
-
-def make_settings(**overrides) -> Settings:
-    base = dict(
-        WEBHOOK_PASSPHRASE="secret",
-        ENABLED_BROKERS="fake",
-        TRADING_MODE="paper",
-    )
-    base.update(overrides)
-    return Settings(**base)
 
 
 def make_signal(**overrides) -> TradingViewSignal:
@@ -21,105 +10,100 @@ def make_signal(**overrides) -> TradingViewSignal:
         passphrase="secret",
         signal_id="sig-1",
         strategy="s1",
-        symbol="NIFTY",
+        symbol="EURUSD",
         action="buy",
-        quantity=50,
+        quantity=0.5,
     )
     base.update(overrides)
     return TradingViewSignal(**base)
 
 
-SYMBOL_MAP = {"NIFTY": {"fake": {"id": "13"}}}
+async def _tenant_with_symbol_map(db_session, symbol_map=None):
+    tenant, _ = await create_tenant(db_session, "trader@example.com")
+    tenant.symbol_map = symbol_map if symbol_map is not None else {"EURUSD": "EURUSD"}
+    await db_session.commit()
+    await db_session.refresh(tenant)
+    return tenant
 
 
-def test_paper_mode_does_not_call_broker(db_session):
-    settings = make_settings(TRADING_MODE="paper")
+async def test_places_order_via_broker(db_session):
+    tenant = await _tenant_with_symbol_map(db_session)
     broker = FakeBroker()
-    results = process_signal(make_signal(), settings, {"fake": broker}, SYMBOL_MAP, db_session, RiskManager(settings))
 
-    assert len(results) == 1
-    assert results[0].status == OrderStatus.SIMULATED
-    assert broker.placed_orders == []
+    result = await process_signal(make_signal(), tenant, db_session, broker)
 
-
-def test_live_mode_calls_broker(db_session):
-    settings = make_settings(TRADING_MODE="live")
-    broker = FakeBroker()
-    results = process_signal(make_signal(), settings, {"fake": broker}, SYMBOL_MAP, db_session, RiskManager(settings))
-
-    assert len(results) == 1
-    assert results[0].status == OrderStatus.ACCEPTED
+    assert result.status == OrderStatus.ACCEPTED
     assert len(broker.placed_orders) == 1
-    assert broker.placed_orders[0].quantity == 50
+    assert broker.placed_orders[0].quantity == 0.5
+    assert broker.placed_orders[0].mt5_symbol == "EURUSD"
 
 
-def test_duplicate_signal_id_is_rejected(db_session):
-    settings = make_settings(TRADING_MODE="live")
+async def test_duplicate_signal_id_is_rejected(db_session):
+    tenant = await _tenant_with_symbol_map(db_session)
     broker = FakeBroker()
-    risk_manager = RiskManager(settings)
 
-    process_signal(make_signal(signal_id="dup-1"), settings, {"fake": broker}, SYMBOL_MAP, db_session, risk_manager)
-    results = process_signal(make_signal(signal_id="dup-1"), settings, {"fake": broker}, SYMBOL_MAP, db_session, risk_manager)
+    await process_signal(make_signal(signal_id="dup-1"), tenant, db_session, broker)
+    result = await process_signal(make_signal(signal_id="dup-1"), tenant, db_session, broker)
 
     assert len(broker.placed_orders) == 1  # second call never reached the broker
-    assert results[0].status == OrderStatus.REJECTED
-    assert "Duplicate" in results[0].message
+    assert result.status == OrderStatus.REJECTED
+    assert "Duplicate" in result.message
 
 
-def test_unmapped_symbol_is_rejected(db_session):
-    settings = make_settings(TRADING_MODE="live")
+async def test_same_signal_id_different_tenants_both_execute(db_session):
+    tenant_a = await _tenant_with_symbol_map(db_session)
+    tenant_b, _ = await create_tenant(db_session, "other@example.com")
+    tenant_b.symbol_map = {"EURUSD": "EURUSD"}
+    await db_session.commit()
+    await db_session.refresh(tenant_b)
+
+    broker_a, broker_b = FakeBroker(), FakeBroker()
+    result_a = await process_signal(make_signal(signal_id="shared-id"), tenant_a, db_session, broker_a)
+    result_b = await process_signal(make_signal(signal_id="shared-id"), tenant_b, db_session, broker_b)
+
+    assert result_a.status == OrderStatus.ACCEPTED
+    assert result_b.status == OrderStatus.ACCEPTED
+
+
+async def test_unmapped_symbol_is_rejected(db_session):
+    tenant = await _tenant_with_symbol_map(db_session, symbol_map={})
     broker = FakeBroker()
-    results = process_signal(
-        make_signal(symbol="DOGEUSD"), settings, {"fake": broker}, SYMBOL_MAP, db_session, RiskManager(settings)
-    )
 
-    assert results[0].status == OrderStatus.REJECTED
-    assert "No enabled broker" in results[0].message
+    result = await process_signal(make_signal(), tenant, db_session, broker)
+
+    assert result.status == OrderStatus.REJECTED
+    assert "No MT5 symbol mapped" in result.message
     assert broker.placed_orders == []
 
 
-def test_close_all_resolves_from_open_position(db_session):
-    settings = make_settings(TRADING_MODE="live")
-    broker = FakeBroker(positions=[{"id": "13", "qty": 75}])
-    results = process_signal(
-        make_signal(action="close_all", signal_id="close-1"),
-        settings,
-        {"fake": broker},
-        SYMBOL_MAP,
-        db_session,
-        RiskManager(settings),
-    )
+async def test_close_all_is_rejected_with_explanation(db_session):
+    tenant = await _tenant_with_symbol_map(db_session)
+    broker = FakeBroker()
 
-    assert results[0].status == OrderStatus.ACCEPTED
+    result = await process_signal(make_signal(action="close_all", signal_id="close-1"), tenant, db_session, broker)
+
+    assert result.status == OrderStatus.REJECTED
+    assert "close_all is not supported" in result.message
+    assert broker.placed_orders == []
+
+
+async def test_close_long_places_opposite_side_order(db_session):
+    tenant = await _tenant_with_symbol_map(db_session)
+    broker = FakeBroker()
+
+    result = await process_signal(make_signal(action="close_long", signal_id="close-2"), tenant, db_session, broker)
+
+    assert result.status == OrderStatus.ACCEPTED
     assert broker.placed_orders[0].side.value == "sell"
-    assert broker.placed_orders[0].quantity == 75
 
 
-def test_close_all_with_no_position_is_a_noop(db_session):
-    settings = make_settings(TRADING_MODE="live")
-    broker = FakeBroker(positions=[])
-    results = process_signal(
-        make_signal(action="close_all", signal_id="close-2"),
-        settings,
-        {"fake": broker},
-        SYMBOL_MAP,
-        db_session,
-        RiskManager(settings),
-    )
+async def test_kill_switch_blocks_before_broker_call(db_session):
+    tenant = await _tenant_with_symbol_map(db_session)
+    tenant.kill_switch_engaged = True
+    await db_session.commit()
+    broker = FakeBroker()
 
-    assert results[0].status == OrderStatus.REJECTED
-    assert "no position" in results[0].message.lower()
+    result = await process_signal(make_signal(), tenant, db_session, broker)
+
+    assert result.status == OrderStatus.REJECTED
     assert broker.placed_orders == []
-
-
-def test_broker_exception_is_captured_not_raised(db_session):
-    class ExplodingBroker(FakeBroker):
-        def place_order(self, order):
-            raise RuntimeError("upstream 500")
-
-    settings = make_settings(TRADING_MODE="live")
-    broker = ExplodingBroker()
-    results = process_signal(make_signal(), settings, {"fake": broker}, SYMBOL_MAP, db_session, RiskManager(settings))
-
-    assert results[0].status == OrderStatus.ERROR
-    assert "upstream 500" in results[0].message
