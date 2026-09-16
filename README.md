@@ -47,10 +47,32 @@ app/
   risk/manager.py         Kill switch, symbol allowlist, qty/daily-loss caps (tenant-scoped)
   services/order_router.py Idempotency, action->side/qty resolution, dispatch
   storage/                 Tenant + TradeLog models, async SQLAlchemy repository
+web/                      Dashboard (static HTML/CSS/vanilla JS, no build step) - served
+                          by the same FastAPI app at "/"
 bridge_agent/agent.py     Self-contained script customers run next to their MT5 terminal
 pine/example_strategy_alert.md   Pine Script + alert JSON template
 tests/                    pytest suite (async, WS round-trip tested end-to-end)
 ```
+
+## Dashboard
+
+Served at `/` by the same FastAPI app (`web/`, mounted last so it never
+shadows an API route). Sign-up and login both work from the browser - login
+is just "paste your API key," stored in the browser's localStorage and sent
+as a Bearer token on every request; there's no separate password/session
+system yet (see "What's deliberately not built yet"). From the dashboard
+you can:
+
+- Sign up / log in
+- See bridge agent connection status, kill-switch state, today's P&L
+- Engage/resume the kill switch
+- View (and copy) your webhook URL, and regenerate the webhook passphrase
+  or agent token if either leaks
+- Edit the symbol map and risk settings
+- Browse recent trades (auto-refreshes every 5s while the tab is open)
+
+It talks to the same JSON API documented below - nothing in `/me/*` is
+dashboard-only.
 
 ## Quickstart (local dev)
 
@@ -107,9 +129,13 @@ pytest -q
 | `PUT /me/symbol-map` | Bearer api_key | Set TradingView-symbol -> MT5-symbol mapping |
 | `PUT /me/risk-settings` | Bearer api_key | Set `max_qty_per_order`, `max_daily_loss`, `allowed_symbols` |
 | `POST /me/kill-switch` | Bearer api_key | Halt this account's trading instantly (`?engaged=true&reason=...`) |
+| `GET /me/trades` | Bearer api_key | Recent trade log, newest first (`?limit=&offset=`) |
+| `POST /me/regenerate-webhook-passphrase` | Bearer api_key | Rotate the passphrase (old one stops working immediately) |
+| `POST /me/regenerate-agent-token` | Bearer api_key | Rotate the agent token (any connected agent must reconnect with the new one) |
 | `POST /webhook/tradingview/{webhook_id}` | passphrase in body | TradingView alerts land here |
 | `WS /agent/ws?token=<agent_token>` | agent_token | The bridge agent's persistent connection |
 | `GET /health` | none | Liveness check |
+| `GET /` | none | Dashboard (static files from `web/`) |
 
 ## Risk management
 
@@ -161,9 +187,11 @@ is never part of this deployment - customers run it themselves via
 
 ## What's deliberately not built yet
 
-- **Web dashboard.** Everything above is JSON API + curl. A UI (signup,
-  symbol map editor, live trade log, kill switch) is a natural next step
-  once the core pipeline is proven.
+- **Real login.** The dashboard authenticates by pasting the API key shown
+  at signup (stored in the browser's localStorage) - there's no password,
+  email verification, or session system, and a lost key has no recovery
+  path other than signing up again. Fine for early users, not for a
+  public launch.
 - **Billing.** No Stripe integration; `plan` exists on the Tenant model as
   a placeholder.
 - **Multi-broker.** MT5-only by design (see the SEBI/regulatory discussion

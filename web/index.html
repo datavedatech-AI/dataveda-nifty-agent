@@ -1,0 +1,175 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>DataVeda MT5 Bridge</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%E2%9A%A1%3C/text%3E%3C/svg%3E" />
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="topbar-inner">
+      <span class="brand">DataVeda <span class="brand-accent">MT5 Bridge</span></span>
+      <div id="topbar-account" class="topbar-account hidden">
+        <span id="account-email" class="muted"></span>
+        <button id="logout-btn" class="btn btn-ghost btn-sm">Log out</button>
+      </div>
+    </div>
+  </header>
+
+  <main id="app" class="container">
+
+    <!-- ===================== AUTH VIEW ===================== -->
+    <section id="auth-view" class="auth-view">
+      <div class="card auth-card">
+        <div class="tabs">
+          <button class="tab tab-active" data-tab="signup">Sign up</button>
+          <button class="tab" data-tab="login">Log in</button>
+        </div>
+
+        <form id="signup-form" class="tab-panel">
+          <label for="signup-email">Email</label>
+          <input id="signup-email" type="email" required placeholder="you@example.com" autocomplete="email" />
+          <button type="submit" class="btn btn-primary">Create account</button>
+          <p class="hint">You'll get a webhook URL, passphrase, and agent token - each shown exactly once.</p>
+        </form>
+
+        <form id="login-form" class="tab-panel hidden">
+          <label for="login-key">API key</label>
+          <input id="login-key" type="password" required placeholder="sk_live_..." autocomplete="off" />
+          <button type="submit" class="btn btn-primary">Log in</button>
+          <p class="hint">Lost your key? There's no recovery yet - sign up again with a different email.</p>
+        </form>
+
+        <p id="auth-error" class="error hidden"></p>
+      </div>
+
+      <!-- One-time secret reveal after signup -->
+      <div id="secrets-modal" class="modal-backdrop hidden">
+        <div class="card modal">
+          <h2>Save these now</h2>
+          <p class="hint">These three values are shown <strong>once</strong>. Store them somewhere safe - there's no way to see the passphrase or agent token again (though you can regenerate them later from the dashboard).</p>
+          <div class="secret-row">
+            <label>API key</label>
+            <div class="copy-field"><code id="secret-api-key"></code><button class="btn btn-sm copy-btn" data-copy="secret-api-key">Copy</button></div>
+          </div>
+          <div class="secret-row">
+            <label>Webhook URL</label>
+            <div class="copy-field"><code id="secret-webhook-url"></code><button class="btn btn-sm copy-btn" data-copy="secret-webhook-url">Copy</button></div>
+          </div>
+          <div class="secret-row">
+            <label>Webhook passphrase</label>
+            <div class="copy-field"><code id="secret-passphrase"></code><button class="btn btn-sm copy-btn" data-copy="secret-passphrase">Copy</button></div>
+          </div>
+          <div class="secret-row">
+            <label>Agent token</label>
+            <div class="copy-field"><code id="secret-agent-token"></code><button class="btn btn-sm copy-btn" data-copy="secret-agent-token">Copy</button></div>
+          </div>
+          <button id="secrets-confirm-btn" class="btn btn-primary">I've saved these - continue</button>
+        </div>
+      </div>
+    </section>
+
+    <!-- ===================== DASHBOARD VIEW ===================== -->
+    <section id="dashboard-view" class="hidden">
+
+      <div class="stat-grid">
+        <div class="card stat-card">
+          <span class="stat-label">Bridge agent</span>
+          <span id="stat-agent" class="stat-value"><span class="dot"></span>-</span>
+        </div>
+        <div class="card stat-card">
+          <span class="stat-label">Trading</span>
+          <span id="stat-kill-switch" class="stat-value"><span class="dot"></span>-</span>
+        </div>
+        <div class="card stat-card">
+          <span class="stat-label">Today's realized P&amp;L</span>
+          <span id="stat-pnl" class="stat-value">-</span>
+        </div>
+        <div class="card stat-card">
+          <span class="stat-label">Plan</span>
+          <span id="stat-plan" class="stat-value">-</span>
+        </div>
+      </div>
+
+      <div id="kill-switch-banner" class="banner banner-danger hidden">
+        <span id="kill-switch-reason-text">Trading is paused.</span>
+        <button id="resume-btn" class="btn btn-sm btn-inverse">Resume trading</button>
+      </div>
+
+      <div class="grid-2">
+        <div class="card">
+          <h2>Kill switch</h2>
+          <p class="hint">Halts every incoming signal for this account immediately, no restart needed.</p>
+          <div class="field-row">
+            <input id="kill-switch-reason" type="text" placeholder="Reason (optional)" />
+            <button id="engage-kill-switch-btn" class="btn btn-danger">Pause trading</button>
+          </div>
+        </div>
+
+        <div class="card">
+          <h2>Webhook &amp; agent</h2>
+          <label>Webhook URL</label>
+          <div class="copy-field"><code id="dash-webhook-url"></code><button class="btn btn-sm copy-btn" data-copy="dash-webhook-url">Copy</button></div>
+          <div class="field-row">
+            <button id="regen-passphrase-btn" class="btn btn-sm btn-ghost">Regenerate passphrase</button>
+            <button id="regen-agent-token-btn" class="btn btn-sm btn-ghost">Regenerate agent token</button>
+          </div>
+          <div id="regen-reveal" class="regen-reveal hidden">
+            <label id="regen-reveal-label"></label>
+            <div class="copy-field"><code id="regen-reveal-value"></code><button class="btn btn-sm copy-btn" data-copy="regen-reveal-value">Copy</button></div>
+          </div>
+          <label>Bridge agent command</label>
+          <div class="copy-field"><code id="agent-command"></code><button class="btn btn-sm copy-btn" data-copy="agent-command">Copy</button></div>
+          <p class="hint">Run this on the Windows machine with your MT5 terminal (uses your agent token - regenerate above if it leaked).</p>
+        </div>
+      </div>
+
+      <div class="grid-2">
+        <div class="card">
+          <h2>Symbol map</h2>
+          <p class="hint">TradingView symbol &rarr; your broker's MT5 symbol name.</p>
+          <table class="table" id="symbol-map-table">
+            <thead><tr><th>TradingView symbol</th><th>MT5 symbol</th><th></th></tr></thead>
+            <tbody id="symbol-map-rows"></tbody>
+          </table>
+          <div class="field-row">
+            <button id="add-symbol-row-btn" class="btn btn-sm btn-ghost">+ Add symbol</button>
+            <button id="save-symbol-map-btn" class="btn btn-primary btn-sm">Save</button>
+          </div>
+        </div>
+
+        <div class="card">
+          <h2>Risk settings</h2>
+          <label for="risk-max-qty">Max quantity per order</label>
+          <input id="risk-max-qty" type="number" step="any" min="0" />
+          <label for="risk-max-daily-loss">Max daily loss (account currency)</label>
+          <input id="risk-max-daily-loss" type="number" step="any" min="0" />
+          <label for="risk-allowed-symbols">Allowed symbols (comma-separated, blank = any)</label>
+          <input id="risk-allowed-symbols" type="text" placeholder="EURUSD, GBPUSD" />
+          <button id="save-risk-settings-btn" class="btn btn-primary btn-sm">Save</button>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-header-row">
+          <h2>Recent trades</h2>
+          <button id="refresh-trades-btn" class="btn btn-sm btn-ghost">Refresh</button>
+        </div>
+        <table class="table">
+          <thead>
+            <tr><th>Time</th><th>Symbol</th><th>Action</th><th>Side</th><th>Qty</th><th>Status</th><th>Message</th></tr>
+          </thead>
+          <tbody id="trades-rows"><tr><td colspan="7" class="muted">No trades yet.</td></tr></tbody>
+        </table>
+      </div>
+
+    </section>
+
+    <p id="toast" class="toast hidden"></p>
+  </main>
+
+  <script src="/app.js"></script>
+</body>
+</html>

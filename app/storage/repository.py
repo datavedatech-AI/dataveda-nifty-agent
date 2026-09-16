@@ -2,7 +2,7 @@ import datetime as dt
 import hashlib
 import secrets
 
-from sqlalchemy import func, select
+from sqlalchemy import desc, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -171,3 +171,36 @@ async def get_today_realized_pnl(session: AsyncSession, tenant_id: str) -> float
         TradeLog.tenant_id == tenant_id, TradeLog.created_at >= start_of_day
     )
     return (await session.execute(stmt)).scalar_one()
+
+
+async def list_trades(session: AsyncSession, tenant_id: str, limit: int = 50, offset: int = 0) -> list[TradeLog]:
+    # process_signal writes two rows per signal that reaches a broker call:
+    # a "reservation" row (used to dedupe retried webhooks, finalized to
+    # status="dispatched") and a second row carrying the actual broker
+    # result. "dispatched" is only ever set on the former, so excluding it
+    # here hides the redundant bookkeeping row without touching how
+    # dedup itself works (that still reads the raw table, unfiltered).
+    stmt = (
+        select(TradeLog)
+        .where(TradeLog.tenant_id == tenant_id, TradeLog.status != "dispatched")
+        .order_by(desc(TradeLog.created_at))
+        .limit(limit)
+        .offset(offset)
+    )
+    return list((await session.execute(stmt)).scalars().all())
+
+
+async def regenerate_webhook_passphrase(session: AsyncSession, tenant: Tenant) -> tuple[Tenant, str]:
+    new_passphrase = secrets.token_urlsafe(18)
+    tenant.webhook_passphrase_hash = hash_secret(new_passphrase)
+    await session.commit()
+    await session.refresh(tenant)
+    return tenant, new_passphrase
+
+
+async def regenerate_agent_token(session: AsyncSession, tenant: Tenant) -> tuple[Tenant, str]:
+    new_token = _generate_id("agent", 24)
+    tenant.agent_token_hash = hash_secret(new_token)
+    await session.commit()
+    await session.refresh(tenant)
+    return tenant, new_token

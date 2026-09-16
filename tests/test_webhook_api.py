@@ -177,3 +177,116 @@ def test_webhook_duplicate_signal_rejected(client: TestClient):
     assert first.json()["status"] == "rejected"  # no agent connected, but signal_id is now reserved
     assert second.json()["status"] == "rejected"
     assert "Duplicate" in second.json()["message"]
+
+
+def test_trades_empty_initially(client: TestClient):
+    account = _signup(client)
+    resp = client.get("/me/trades", headers=_auth_headers(account))
+    assert resp.status_code == 200
+    assert resp.json()["trades"] == []
+
+
+def test_trades_lists_after_a_signal(client: TestClient):
+    account = _signup(client)
+    client.put("/me/symbol-map", json={"symbol_map": {"EURUSD": "EURUSD"}}, headers=_auth_headers(account))
+    client.post(
+        account["webhook_url"],
+        json={
+            "passphrase": account["webhook_passphrase"],
+            "signal_id": "trade-log-1",
+            "strategy": "s",
+            "symbol": "EURUSD",
+            "action": "buy",
+            "quantity": 0.1,
+        },
+    )
+
+    resp = client.get("/me/trades", headers=_auth_headers(account))
+    trades = resp.json()["trades"]
+    assert len(trades) == 1  # the internal dedup "reservation" row is filtered out
+    assert trades[0]["signal_id"] == "trade-log-1"
+    assert trades[0]["status"] == "rejected"  # no bridge agent connected
+
+
+def test_trades_requires_auth(client: TestClient):
+    resp = client.get("/me/trades")
+    assert resp.status_code == 401
+
+
+def test_trades_scoped_per_tenant(client: TestClient):
+    account_a = _signup(client, "a@example.com")
+    account_b = _signup(client, "b@example.com")
+    client.put("/me/symbol-map", json={"symbol_map": {"EURUSD": "EURUSD"}}, headers=_auth_headers(account_a))
+    client.post(
+        account_a["webhook_url"],
+        json={
+            "passphrase": account_a["webhook_passphrase"],
+            "signal_id": "only-a",
+            "strategy": "s",
+            "symbol": "EURUSD",
+            "action": "buy",
+            "quantity": 0.1,
+        },
+    )
+
+    resp_b = client.get("/me/trades", headers=_auth_headers(account_b))
+    assert resp_b.json()["trades"] == []
+
+
+def test_regenerate_webhook_passphrase_invalidates_old_one(client: TestClient):
+    account = _signup(client)
+    client.put("/me/symbol-map", json={"symbol_map": {"EURUSD": "EURUSD"}}, headers=_auth_headers(account))
+
+    resp = client.post("/me/regenerate-webhook-passphrase", headers=_auth_headers(account))
+    assert resp.status_code == 200
+    new_passphrase = resp.json()["webhook_passphrase"]
+    assert new_passphrase != account["webhook_passphrase"]
+
+    old_attempt = client.post(
+        account["webhook_url"],
+        json={
+            "passphrase": account["webhook_passphrase"],
+            "signal_id": "s1",
+            "strategy": "s",
+            "symbol": "EURUSD",
+            "action": "buy",
+            "quantity": 0.1,
+        },
+    )
+    assert old_attempt.status_code == 401
+
+    new_attempt = client.post(
+        account["webhook_url"],
+        json={
+            "passphrase": new_passphrase,
+            "signal_id": "s2",
+            "strategy": "s",
+            "symbol": "EURUSD",
+            "action": "buy",
+            "quantity": 0.1,
+        },
+    )
+    assert new_attempt.status_code == 200
+
+
+def test_regenerate_agent_token_invalidates_old_one(client: TestClient):
+    account = _signup(client)
+
+    resp = client.post("/me/regenerate-agent-token", headers=_auth_headers(account))
+    assert resp.status_code == 200
+    new_token = resp.json()["agent_token"]
+    assert new_token != account["agent_token"]
+
+    # Old token can no longer open the bridge agent's WebSocket connection -
+    # the server closes it during the handshake, which TestClient surfaces
+    # as a WebSocketDisconnect raised by the `with` block itself.
+    from starlette.websockets import WebSocketDisconnect
+
+    with pytest.raises(WebSocketDisconnect):
+        with client.websocket_connect(f"/agent/ws?token={account['agent_token']}"):
+            pass
+
+    # New token connects fine.
+    with client.websocket_connect(f"/agent/ws?token={new_token}") as ws:
+        me = client.get("/me", headers=_auth_headers(account)).json()
+        assert me["bridge_agent_connected"] is True

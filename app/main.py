@@ -1,7 +1,9 @@
 import logging
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, EmailStr, ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.websockets import WebSocket, WebSocketDisconnect
@@ -19,6 +21,9 @@ from app.storage.repository import (
     get_tenant_by_webhook_id,
     get_today_realized_pnl,
     hash_secret,
+    list_trades,
+    regenerate_agent_token,
+    regenerate_webhook_passphrase,
     set_kill_switch,
     update_risk_settings,
     update_symbol_map,
@@ -155,6 +160,53 @@ async def post_kill_switch(
     return {"engaged": tenant.kill_switch_engaged, "reason": tenant.kill_switch_reason}
 
 
+@app.get("/me/trades")
+async def get_trades(
+    limit: int = 50, offset: int = 0, tenant: Tenant = Depends(get_current_tenant), db: AsyncSession = Depends(get_db)
+):
+    limit = max(1, min(limit, 200))
+    trades = await list_trades(db, tenant.id, limit=limit, offset=max(0, offset))
+    return {
+        "trades": [
+            {
+                "signal_id": t.signal_id.removesuffix(":mt5"),
+                "strategy": t.strategy,
+                "symbol": t.symbol,
+                "action": t.action,
+                "side": t.side,
+                "quantity": t.quantity,
+                "status": t.status,
+                "message": t.message,
+                "broker_order_id": t.broker_order_id,
+                "realized_pnl": t.realized_pnl,
+                "created_at": t.created_at.isoformat(),
+            }
+            for t in trades
+        ]
+    }
+
+
+@app.post("/me/regenerate-webhook-passphrase")
+async def post_regenerate_webhook_passphrase(tenant: Tenant = Depends(get_current_tenant), db: AsyncSession = Depends(get_db)):
+    tenant, new_passphrase = await regenerate_webhook_passphrase(db, tenant)
+    return {
+        "webhook_passphrase": new_passphrase,
+        "message": "Save this now - it won't be shown again. Update your TradingView alert JSON with it.",
+    }
+
+
+@app.post("/me/regenerate-agent-token")
+async def post_regenerate_agent_token(tenant: Tenant = Depends(get_current_tenant), db: AsyncSession = Depends(get_db)):
+    tenant, new_token = await regenerate_agent_token(db, tenant)
+    return {
+        "agent_token": new_token,
+        "message": (
+            "Save this now - it won't be shown again. Restart bridge_agent.py with the new token; "
+            "any agent still running with the old token will need to reconnect with this one."
+        ),
+    }
+
+
 @app.post("/webhook/tradingview/{webhook_id}")
 async def tradingview_webhook(webhook_id: str, request: Request, db: AsyncSession = Depends(get_db)):
     tenant = await get_tenant_by_webhook_id(db, webhook_id)
@@ -211,3 +263,11 @@ async def agent_ws(websocket: WebSocket):
         pass
     finally:
         manager.disconnect(tenant.id)
+
+
+# Mounted last so it never shadows an API route above - Starlette matches
+# routes in registration order, and a "/" static mount would otherwise
+# swallow everything.
+_web_dir = Path(__file__).resolve().parent.parent / "web"
+if _web_dir.is_dir():
+    app.mount("/", StaticFiles(directory=str(_web_dir), html=True), name="dashboard")
