@@ -9,6 +9,7 @@
   --danger: #dc2626;
   --danger-hover: #b91c1c;
   --success: #16a34a;
+  --warning: #d97706;
   --radius: 10px;
   --shadow: 0 1px 2px rgba(16, 24, 40, 0.06), 0 1px 3px rgba(16, 24, 40, 0.08);
 }
@@ -84,6 +85,7 @@ body {
 .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--text-muted); display: inline-block; }
 .dot-green { background: var(--success); }
 .dot-red { background: var(--danger); }
+.dot-amber { background: var(--warning); }
 
 /* ---------- forms ---------- */
 label { display: block; font-size: 12px; font-weight: 600; margin: 12px 0 4px; color: var(--text-muted); }
@@ -178,6 +180,7 @@ input:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
   display: flex; align-items: center; justify-content: space-between; font-weight: 600;
 }
 .banner-danger { background: var(--danger); color: white; }
+.banner-warning { background: var(--warning); color: white; }
 
 /* ---------- toast ---------- */
 .toast {

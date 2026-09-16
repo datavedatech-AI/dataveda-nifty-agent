@@ -19,6 +19,26 @@ def utcnow_naive() -> dt.datetime:
     return dt.datetime.now(dt.timezone.utc).replace(tzinfo=None)
 
 
+SUBSCRIPTION_EXPIRING_SOON_DAYS = 7
+
+
+def subscription_status(tenant: Tenant) -> dict:
+    """Computed, read-only view of a tenant's subscription state - shared
+    by /me and /admin/tenants so the two never drift out of sync.
+    """
+    now = utcnow_naive()
+    expires_at = tenant.subscription_expires_at
+    active = bool(expires_at and expires_at > now)
+    days_remaining = (expires_at - now).days if active else None
+    expiring_soon = active and days_remaining is not None and days_remaining <= SUBSCRIPTION_EXPIRING_SOON_DAYS
+    return {
+        "subscription_expires_at": expires_at.isoformat() if expires_at else None,
+        "subscription_active": active,
+        "subscription_expiring_soon": expiring_soon,
+        "subscription_days_remaining": days_remaining,
+    }
+
+
 def _generate_id(prefix: str, nbytes: int = 16) -> str:
     return f"{prefix}_{secrets.token_urlsafe(nbytes)}"
 

@@ -80,6 +80,10 @@
   function subscriptionPill(t) {
     if (t.subscription_active) {
       const until = parseUtcIso(t.subscription_expires_at).toLocaleDateString();
+      if (t.subscription_expiring_soon) {
+        const days = t.subscription_days_remaining;
+        return `<span class="status-pill status-error">Expires in ${days} day${days === 1 ? "" : "s"} (${until})</span>`;
+      }
       return `<span class="status-pill status-accepted">Active until ${until}</span>`;
     }
     if (t.subscription_expires_at) {
@@ -146,11 +150,17 @@
     });
   }
 
-  $("search-box").addEventListener("input", () => {
+  function applyFilters() {
     const q = $("search-box").value.trim().toLowerCase();
-    const filtered = q ? tenantsCache.filter((t) => t.email.toLowerCase().includes(q)) : tenantsCache;
+    const expiringOnly = $("expiring-soon-filter").checked;
+    let filtered = tenantsCache;
+    if (q) filtered = filtered.filter((t) => t.email.toLowerCase().includes(q));
+    if (expiringOnly) filtered = filtered.filter((t) => t.subscription_expiring_soon);
     renderTenants(filtered);
-  });
+  }
+
+  $("search-box").addEventListener("input", applyFilters);
+  $("expiring-soon-filter").addEventListener("change", applyFilters);
 
   $("refresh-btn").addEventListener("click", loadTenants);
 
@@ -158,7 +168,7 @@
     try {
       const res = await api("/admin/tenants?limit=200");
       tenantsCache = res.tenants;
-      renderTenants(tenantsCache);
+      applyFilters();
     } catch (err) {
       if (err.status === 401) {
         adminKey = null;

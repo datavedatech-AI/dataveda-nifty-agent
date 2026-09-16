@@ -1,4 +1,3 @@
-import datetime as dt
 import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -31,9 +30,9 @@ from app.storage.repository import (
     regenerate_webhook_passphrase,
     revoke_subscription,
     set_kill_switch,
+    subscription_status,
     update_risk_settings,
     update_symbol_map,
-    utcnow_naive,
 )
 from app.ws.manager import ConnectionManager
 from app.ws.relay_broker import WSRelayBroker
@@ -122,7 +121,6 @@ async def signup(payload: SignupRequest, db: AsyncSession = Depends(get_db)):
 
 @app.get("/me")
 async def get_me(request: Request, tenant: Tenant = Depends(get_current_tenant), db: AsyncSession = Depends(get_db)):
-    now = utcnow_naive()
     return {
         "tenant_id": tenant.id,
         "email": tenant.email,
@@ -132,8 +130,7 @@ async def get_me(request: Request, tenant: Tenant = Depends(get_current_tenant),
         "plan": tenant.plan,
         "kill_switch_engaged": tenant.kill_switch_engaged,
         "kill_switch_reason": tenant.kill_switch_reason,
-        "subscription_expires_at": tenant.subscription_expires_at.isoformat() if tenant.subscription_expires_at else None,
-        "subscription_active": bool(tenant.subscription_expires_at and tenant.subscription_expires_at > now),
+        **subscription_status(tenant),
         "bridge_agent_connected": request.app.state.ws_manager.is_connected(tenant.id),
         "today_realized_pnl": await get_today_realized_pnl(db, tenant.id),
     }
@@ -229,13 +226,12 @@ class SubscriptionGrant(BaseModel):
     days: int = 30
 
 
-def _serialize_tenant_for_admin(tenant: Tenant, now: dt.datetime) -> dict:
+def _serialize_tenant_for_admin(tenant: Tenant) -> dict:
     return {
         "tenant_id": tenant.id,
         "email": tenant.email,
         "plan": tenant.plan,
-        "subscription_expires_at": tenant.subscription_expires_at.isoformat() if tenant.subscription_expires_at else None,
-        "subscription_active": bool(tenant.subscription_expires_at and tenant.subscription_expires_at > now),
+        **subscription_status(tenant),
         "kill_switch_engaged": tenant.kill_switch_engaged,
         "created_at": tenant.created_at.isoformat(),
     }
@@ -244,8 +240,7 @@ def _serialize_tenant_for_admin(tenant: Tenant, now: dt.datetime) -> dict:
 @app.get("/admin/tenants", dependencies=[Depends(get_current_admin)])
 async def admin_list_tenants(limit: int = 100, offset: int = 0, db: AsyncSession = Depends(get_db)):
     tenants = await list_tenants(db, limit=max(1, min(limit, 500)), offset=max(0, offset))
-    now = utcnow_naive()
-    return {"tenants": [_serialize_tenant_for_admin(t, now) for t in tenants]}
+    return {"tenants": [_serialize_tenant_for_admin(t) for t in tenants]}
 
 
 @app.post("/admin/tenants/{tenant_id}/subscription", dependencies=[Depends(get_current_admin)])
@@ -257,7 +252,7 @@ async def admin_grant_subscription(tenant_id: str, payload: SubscriptionGrant, d
         raise HTTPException(status_code=404, detail="Unknown tenant")
     tenant = await grant_subscription(db, tenant, payload.days)
     logger.warning("Admin granted %d day(s) to tenant %s, now expires %s", payload.days, tenant.id, tenant.subscription_expires_at)
-    return _serialize_tenant_for_admin(tenant, utcnow_naive())
+    return _serialize_tenant_for_admin(tenant)
 
 
 @app.post("/admin/tenants/{tenant_id}/revoke-subscription", dependencies=[Depends(get_current_admin)])
@@ -267,7 +262,7 @@ async def admin_revoke_subscription(tenant_id: str, db: AsyncSession = Depends(g
         raise HTTPException(status_code=404, detail="Unknown tenant")
     tenant = await revoke_subscription(db, tenant)
     logger.warning("Admin revoked subscription for tenant %s", tenant.id)
-    return _serialize_tenant_for_admin(tenant, utcnow_naive())
+    return _serialize_tenant_for_admin(tenant)
 
 
 @app.post("/webhook/tradingview/{webhook_id}")

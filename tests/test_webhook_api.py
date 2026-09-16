@@ -432,3 +432,31 @@ def test_admin_list_tenants(client: TestClient):
     assert resp.status_code == 200
     emails = [t["email"] for t in resp.json()["tenants"]]
     assert "list-me@example.com" in emails
+
+
+def test_me_shows_expiring_soon(client: TestClient):
+    account = _signup(client)
+    _grant_subscription(client, account, days=3)
+
+    me = client.get("/me", headers=_auth_headers(account)).json()
+    assert me["subscription_active"] is True
+    assert me["subscription_expiring_soon"] is True
+    assert me["subscription_days_remaining"] in (2, 3)
+
+
+def test_me_not_expiring_soon_with_long_subscription(client: TestClient):
+    account = _signup(client)
+    _grant_subscription(client, account, days=30)
+
+    me = client.get("/me", headers=_auth_headers(account)).json()
+    assert me["subscription_expiring_soon"] is False
+
+
+def test_admin_tenants_shows_expiring_soon(client: TestClient):
+    account = _signup(client, "expiring@example.com")
+    _grant_subscription(client, account, days=2)
+
+    tenants = client.get("/admin/tenants", headers=_admin_headers()).json()["tenants"]
+    tenant = next(t for t in tenants if t["email"] == "expiring@example.com")
+    assert tenant["subscription_expiring_soon"] is True
+    assert tenant["subscription_days_remaining"] in (1, 2)

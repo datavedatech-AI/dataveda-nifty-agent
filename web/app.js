@@ -197,11 +197,22 @@
     const subBanner = $("subscription-banner");
     if (me.subscription_active) {
       const until = parseUtcIso(me.subscription_expires_at);
-      subEl.innerHTML = `<span class="dot dot-green"></span> Until ${until.toLocaleDateString()}`;
-      subBanner.classList.add("hidden");
+      if (me.subscription_expiring_soon) {
+        const days = me.subscription_days_remaining;
+        subEl.innerHTML = `<span class="dot dot-amber"></span> ${days} day${days === 1 ? "" : "s"} left`;
+        subBanner.classList.remove("hidden", "banner-danger");
+        subBanner.classList.add("banner-warning");
+        $("subscription-banner-text").textContent =
+          `Your subscription expires ${days === 0 ? "today" : `in ${days} day${days === 1 ? "" : "s"}`} ` +
+          `(${until.toLocaleDateString()}). Renew soon to avoid an interruption in trading.`;
+      } else {
+        subEl.innerHTML = `<span class="dot dot-green"></span> Until ${until.toLocaleDateString()}`;
+        subBanner.classList.add("hidden");
+      }
     } else {
       subEl.innerHTML = '<span class="dot dot-red"></span> Inactive';
-      subBanner.classList.remove("hidden");
+      subBanner.classList.remove("hidden", "banner-warning");
+      subBanner.classList.add("banner-danger");
       $("subscription-banner-text").textContent = me.subscription_expires_at
         ? `Your subscription expired on ${parseUtcIso(me.subscription_expires_at).toLocaleDateString()}. Signals will be rejected until it's renewed - contact us to renew.`
         : "Your account hasn't been activated yet. Signals will be rejected until a subscription is granted - contact us to get started.";

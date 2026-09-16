@@ -1,6 +1,7 @@
 import datetime as dt
 
 from app.storage.repository import (
+    SUBSCRIPTION_EXPIRING_SOON_DAYS,
     create_tenant,
     get_tenant_by_agent_token,
     get_tenant_by_api_key,
@@ -10,6 +11,7 @@ from app.storage.repository import (
     hash_secret,
     list_tenants,
     revoke_subscription,
+    subscription_status,
     utcnow_naive,
 )
 
@@ -121,3 +123,53 @@ async def test_list_tenants_newest_first(db_session):
 
     ids = [t.id for t in tenants]
     assert ids.index(t2.id) < ids.index(t1.id)
+
+
+async def test_subscription_status_never_activated(db_session):
+    tenant, _ = await create_tenant(db_session, "never@example.com")
+    status = subscription_status(tenant)
+    assert status["subscription_active"] is False
+    assert status["subscription_expiring_soon"] is False
+    assert status["subscription_days_remaining"] is None
+    assert status["subscription_expires_at"] is None
+
+
+async def test_subscription_status_expired(db_session):
+    tenant, _ = await create_tenant(db_session, "expired@example.com")
+    tenant.subscription_expires_at = utcnow_naive() - dt.timedelta(days=5)
+    await db_session.commit()
+
+    status = subscription_status(tenant)
+    assert status["subscription_active"] is False
+    assert status["subscription_expiring_soon"] is False
+    assert status["subscription_days_remaining"] is None
+
+
+async def test_subscription_status_active_not_expiring_soon(db_session):
+    tenant, _ = await create_tenant(db_session, "healthy@example.com")
+    tenant = await grant_subscription(db_session, tenant, days=SUBSCRIPTION_EXPIRING_SOON_DAYS + 10)
+
+    status = subscription_status(tenant)
+    assert status["subscription_active"] is True
+    assert status["subscription_expiring_soon"] is False
+    assert status["subscription_days_remaining"] > SUBSCRIPTION_EXPIRING_SOON_DAYS
+
+
+async def test_subscription_status_expiring_soon(db_session):
+    tenant, _ = await create_tenant(db_session, "soon@example.com")
+    tenant = await grant_subscription(db_session, tenant, days=3)
+
+    status = subscription_status(tenant)
+    assert status["subscription_active"] is True
+    assert status["subscription_expiring_soon"] is True
+    assert status["subscription_days_remaining"] in (2, 3)
+
+
+async def test_subscription_status_at_threshold_boundary_counts_as_soon(db_session):
+    tenant, _ = await create_tenant(db_session, "boundary@example.com")
+    tenant.subscription_expires_at = utcnow_naive() + dt.timedelta(days=SUBSCRIPTION_EXPIRING_SOON_DAYS)
+    await db_session.commit()
+
+    status = subscription_status(tenant)
+    assert status["subscription_active"] is True
+    assert status["subscription_expiring_soon"] is True

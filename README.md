@@ -110,7 +110,28 @@ out of anything customer-facing.
 `ADMIN_API_KEY` (stored in the browser's localStorage under a different
 key than the customer login, so the two never collide in the same
 browser). Lists every tenant with their subscription/trading status and
-lets you grant or revoke access without curl.
+lets you grant or revoke access without curl. An "Expiring soon only"
+checkbox filters the list to accounts you should follow up with for renewal.
+
+## Expiring-soon reminder
+
+There's no email/SMS here - no provider is wired up, and picking one
+(SendGrid, SES, whatever) wasn't part of this build. What exists instead
+is in-app: `subscription_status()` (`app/storage/repository.py`) computes
+`subscription_expiring_soon` and `subscription_days_remaining` whenever a
+tenant is within `SUBSCRIPTION_EXPIRING_SOON_DAYS` (7, by default) of
+their expiry, and both `/me` and `/admin/tenants` return it.
+
+- **Customer dashboard**: an amber banner ("expires in N days") replaces
+  the usual hidden-when-healthy state, distinct from the red banner shown
+  once trading is actually blocked.
+- **Admin page**: an amber pill per tenant, plus the "Expiring soon only"
+  filter above, so you know who to chase for a renewal before they lapse.
+
+If you want actual email/SMS reminders later, `subscription_status()` is
+the one place that would need a scheduled job built on top of it (check
+tenants where `subscription_expiring_soon` is true, on some cadence, send
+once per tenant per expiry so it doesn't re-notify on every check).
 
 ## Quickstart (local dev)
 
