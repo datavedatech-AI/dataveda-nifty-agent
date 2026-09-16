@@ -1,7 +1,7 @@
 from app.models.order import OrderStatus
 from app.models.signal import TradingViewSignal
 from app.services.order_router import process_signal
-from app.storage.repository import create_tenant
+from app.storage.repository import create_tenant, grant_subscription
 from tests.fakes import FakeBroker
 
 
@@ -18,11 +18,12 @@ def make_signal(**overrides) -> TradingViewSignal:
     return TradingViewSignal(**base)
 
 
-async def _tenant_with_symbol_map(db_session, symbol_map=None):
-    tenant, _ = await create_tenant(db_session, "trader@example.com")
+async def _tenant_with_symbol_map(db_session, symbol_map=None, email="trader@example.com"):
+    tenant, _ = await create_tenant(db_session, email)
     tenant.symbol_map = symbol_map if symbol_map is not None else {"EURUSD": "EURUSD"}
     await db_session.commit()
     await db_session.refresh(tenant)
+    tenant = await grant_subscription(db_session, tenant, days=30)
     return tenant
 
 
@@ -52,10 +53,7 @@ async def test_duplicate_signal_id_is_rejected(db_session):
 
 async def test_same_signal_id_different_tenants_both_execute(db_session):
     tenant_a = await _tenant_with_symbol_map(db_session)
-    tenant_b, _ = await create_tenant(db_session, "other@example.com")
-    tenant_b.symbol_map = {"EURUSD": "EURUSD"}
-    await db_session.commit()
-    await db_session.refresh(tenant_b)
+    tenant_b = await _tenant_with_symbol_map(db_session, email="other@example.com")
 
     broker_a, broker_b = FakeBroker(), FakeBroker()
     result_a = await process_signal(make_signal(signal_id="shared-id"), tenant_a, db_session, broker_a)
@@ -106,4 +104,17 @@ async def test_kill_switch_blocks_before_broker_call(db_session):
     result = await process_signal(make_signal(), tenant, db_session, broker)
 
     assert result.status == OrderStatus.REJECTED
+    assert broker.placed_orders == []
+
+
+async def test_no_subscription_blocks_before_broker_call(db_session):
+    tenant, _ = await create_tenant(db_session, "unpaid@example.com")
+    tenant.symbol_map = {"EURUSD": "EURUSD"}
+    await db_session.commit()
+    broker = FakeBroker()
+
+    result = await process_signal(make_signal(), tenant, db_session, broker)
+
+    assert result.status == OrderStatus.REJECTED
+    assert "No active subscription" in result.message
     assert broker.placed_orders == []

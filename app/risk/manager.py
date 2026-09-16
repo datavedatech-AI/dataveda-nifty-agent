@@ -4,7 +4,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.signal import TradingViewSignal
 from app.storage.models import Tenant
-from app.storage.repository import get_today_realized_pnl
+from app.storage.repository import get_today_realized_pnl, utcnow_naive
 
 
 @dataclass
@@ -15,8 +15,8 @@ class RiskCheckResult:
 
 async def check_risk(tenant: Tenant, signal: TradingViewSignal, session: AsyncSession) -> RiskCheckResult:
     """Guardrails applied to every signal before an order is sent, in order
-    (first failure wins): kill switch, symbol allowlist, max qty per order,
-    daily realized-loss circuit breaker.
+    (first failure wins): subscription status, kill switch, symbol
+    allowlist, max qty per order, daily realized-loss circuit breaker.
 
     Deliberately does NOT check live open-position count here - that would
     mean a broker round trip (over the WebSocket relay) on every single
@@ -24,6 +24,9 @@ async def check_risk(tenant: Tenant, signal: TradingViewSignal, session: AsyncSe
     latency this product is trying to avoid. Open-position limits can be
     enforced by the bridge agent itself in a later pass if needed.
     """
+    if tenant.subscription_expires_at is None or tenant.subscription_expires_at <= utcnow_naive():
+        return RiskCheckResult(False, "No active subscription - contact us to renew access")
+
     if tenant.kill_switch_engaged:
         return RiskCheckResult(False, f"Kill switch engaged: {tenant.kill_switch_reason or 'no reason given'}")
 

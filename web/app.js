@@ -63,6 +63,16 @@
     return `python bridge_agent/agent.py --server ${wsBaseUrl()}/agent/ws --token ${t}`;
   }
 
+  // The backend serializes naive-UTC timestamps (no trailing "Z" or
+  // offset) - `new Date("...")` on a string like that is parsed as LOCAL
+  // time per spec, not UTC, which would shift every displayed time by the
+  // viewer's UTC offset. Force UTC interpretation here instead.
+  function parseUtcIso(isoString) {
+    if (!isoString) return null;
+    const withZ = /[Zz]|[+-]\d\d:\d\d$/.test(isoString) ? isoString : `${isoString}Z`;
+    return new Date(withZ);
+  }
+
   document.addEventListener("click", (e) => {
     const btn = e.target.closest(".copy-btn");
     if (!btn) return;
@@ -182,6 +192,20 @@
     pnlEl.style.color = pnl < 0 ? "var(--danger)" : pnl > 0 ? "var(--success)" : "var(--text)";
 
     $("stat-plan").textContent = me.plan;
+
+    const subEl = $("stat-subscription");
+    const subBanner = $("subscription-banner");
+    if (me.subscription_active) {
+      const until = parseUtcIso(me.subscription_expires_at);
+      subEl.innerHTML = `<span class="dot dot-green"></span> Until ${until.toLocaleDateString()}`;
+      subBanner.classList.add("hidden");
+    } else {
+      subEl.innerHTML = '<span class="dot dot-red"></span> Inactive';
+      subBanner.classList.remove("hidden");
+      $("subscription-banner-text").textContent = me.subscription_expires_at
+        ? `Your subscription expired on ${parseUtcIso(me.subscription_expires_at).toLocaleDateString()}. Signals will be rejected until it's renewed - contact us to renew.`
+        : "Your account hasn't been activated yet. Signals will be rejected until a subscription is granted - contact us to get started.";
+    }
 
     $("dash-webhook-url").textContent = `${window.location.origin}${me.webhook_url}`;
     $("agent-command").textContent = agentCommand(lastKnownAgentToken);
@@ -310,7 +334,7 @@
       .map(
         (t) => `
       <tr>
-        <td>${new Date(t.created_at).toLocaleString()}</td>
+        <td>${parseUtcIso(t.created_at).toLocaleString()}</td>
         <td>${t.symbol}</td>
         <td>${t.action}</td>
         <td>${t.side || "-"}</td>

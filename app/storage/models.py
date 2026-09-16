@@ -28,6 +28,15 @@ class Tenant(Base):
     kill_switch_engaged: Mapped[bool] = mapped_column(Boolean, default=False)
     kill_switch_reason: Mapped[str] = mapped_column(String, default="")
 
+    # Manually granted by the platform admin after payment is received
+    # out-of-band (see app/storage/repository.py grant_subscription /
+    # revoke_subscription). None means "never authorized" - a brand new
+    # signup cannot trade until this is set. Always naive UTC (never
+    # tz-aware): SQLite silently drops tzinfo on round-trip, so mixing
+    # aware and naive datetimes here would eventually throw a TypeError
+    # on comparison. Keep every read/write of this field naive-UTC.
+    subscription_expires_at: Mapped[dt.datetime | None] = mapped_column(DateTime, nullable=True, default=None)
+
     created_at: Mapped[dt.datetime] = mapped_column(DateTime, default=lambda: dt.datetime.now(dt.timezone.utc))
 
 

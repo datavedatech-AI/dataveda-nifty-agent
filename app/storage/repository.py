@@ -13,6 +13,12 @@ def hash_secret(secret: str) -> str:
     return hashlib.sha256(secret.encode()).hexdigest()
 
 
+def utcnow_naive() -> dt.datetime:
+    """Naive UTC 'now', matching how Tenant.subscription_expires_at is
+    stored (see the comment on that column for why it must stay naive)."""
+    return dt.datetime.now(dt.timezone.utc).replace(tzinfo=None)
+
+
 def _generate_id(prefix: str, nbytes: int = 16) -> str:
     return f"{prefix}_{secrets.token_urlsafe(nbytes)}"
 
@@ -73,6 +79,36 @@ async def get_tenant_by_webhook_id(session: AsyncSession, webhook_id: str) -> Te
 async def get_tenant_by_agent_token(session: AsyncSession, agent_token: str) -> Tenant | None:
     stmt = select(Tenant).where(Tenant.agent_token_hash == hash_secret(agent_token))
     return (await session.execute(stmt)).scalar_one_or_none()
+
+
+async def get_tenant_by_id(session: AsyncSession, tenant_id: str) -> Tenant | None:
+    return await session.get(Tenant, tenant_id)
+
+
+async def list_tenants(session: AsyncSession, limit: int = 100, offset: int = 0) -> list[Tenant]:
+    stmt = select(Tenant).order_by(desc(Tenant.created_at)).limit(limit).offset(offset)
+    return list((await session.execute(stmt)).scalars().all())
+
+
+async def grant_subscription(session: AsyncSession, tenant: Tenant, days: int) -> Tenant:
+    """Extend from the later of (now, current expiry) so renewing early
+    never loses remaining paid-for days; renewing a lapsed account starts
+    fresh from now.
+    """
+    now = utcnow_naive()
+    base = tenant.subscription_expires_at if tenant.subscription_expires_at and tenant.subscription_expires_at > now else now
+    tenant.subscription_expires_at = base + dt.timedelta(days=days)
+    await session.commit()
+    await session.refresh(tenant)
+    return tenant
+
+
+async def revoke_subscription(session: AsyncSession, tenant: Tenant) -> Tenant:
+    """Immediate cutoff - e.g. a chargeback or refund."""
+    tenant.subscription_expires_at = utcnow_naive()
+    await session.commit()
+    await session.refresh(tenant)
+    return tenant
 
 
 async def set_kill_switch(session: AsyncSession, tenant: Tenant, engaged: bool, reason: str = "") -> Tenant:

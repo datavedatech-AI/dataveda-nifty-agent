@@ -1,8 +1,10 @@
+import datetime as dt
 import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
+from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, EmailStr, ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -18,15 +20,20 @@ from app.storage.repository import (
     create_tenant,
     get_tenant_by_agent_token,
     get_tenant_by_api_key,
+    get_tenant_by_id,
     get_tenant_by_webhook_id,
     get_today_realized_pnl,
+    grant_subscription,
     hash_secret,
+    list_tenants,
     list_trades,
     regenerate_agent_token,
     regenerate_webhook_passphrase,
+    revoke_subscription,
     set_kill_switch,
     update_risk_settings,
     update_symbol_map,
+    utcnow_naive,
 )
 from app.ws.manager import ConnectionManager
 from app.ws.relay_broker import WSRelayBroker
@@ -75,6 +82,14 @@ async def get_current_tenant(
     return tenant
 
 
+async def get_current_admin(x_admin_key: str = Header(default=""), settings: Settings = Depends(get_settings)) -> None:
+    # The `not settings.admin_api_key` check must come first and short-
+    # circuit: hmac.compare_digest("", "") is True, so without it, an
+    # unset ADMIN_API_KEY plus a missing header would authorize anyone.
+    if not settings.admin_api_key or not passphrase_matches(x_admin_key, settings.admin_api_key):
+        raise HTTPException(status_code=401, detail="Invalid admin key")
+
+
 @app.get("/health")
 def health():
     return {"status": "ok"}
@@ -107,6 +122,7 @@ async def signup(payload: SignupRequest, db: AsyncSession = Depends(get_db)):
 
 @app.get("/me")
 async def get_me(request: Request, tenant: Tenant = Depends(get_current_tenant), db: AsyncSession = Depends(get_db)):
+    now = utcnow_naive()
     return {
         "tenant_id": tenant.id,
         "email": tenant.email,
@@ -116,6 +132,8 @@ async def get_me(request: Request, tenant: Tenant = Depends(get_current_tenant),
         "plan": tenant.plan,
         "kill_switch_engaged": tenant.kill_switch_engaged,
         "kill_switch_reason": tenant.kill_switch_reason,
+        "subscription_expires_at": tenant.subscription_expires_at.isoformat() if tenant.subscription_expires_at else None,
+        "subscription_active": bool(tenant.subscription_expires_at and tenant.subscription_expires_at > now),
         "bridge_agent_connected": request.app.state.ws_manager.is_connected(tenant.id),
         "today_realized_pnl": await get_today_realized_pnl(db, tenant.id),
     }
@@ -207,6 +225,51 @@ async def post_regenerate_agent_token(tenant: Tenant = Depends(get_current_tenan
     }
 
 
+class SubscriptionGrant(BaseModel):
+    days: int = 30
+
+
+def _serialize_tenant_for_admin(tenant: Tenant, now: dt.datetime) -> dict:
+    return {
+        "tenant_id": tenant.id,
+        "email": tenant.email,
+        "plan": tenant.plan,
+        "subscription_expires_at": tenant.subscription_expires_at.isoformat() if tenant.subscription_expires_at else None,
+        "subscription_active": bool(tenant.subscription_expires_at and tenant.subscription_expires_at > now),
+        "kill_switch_engaged": tenant.kill_switch_engaged,
+        "created_at": tenant.created_at.isoformat(),
+    }
+
+
+@app.get("/admin/tenants", dependencies=[Depends(get_current_admin)])
+async def admin_list_tenants(limit: int = 100, offset: int = 0, db: AsyncSession = Depends(get_db)):
+    tenants = await list_tenants(db, limit=max(1, min(limit, 500)), offset=max(0, offset))
+    now = utcnow_naive()
+    return {"tenants": [_serialize_tenant_for_admin(t, now) for t in tenants]}
+
+
+@app.post("/admin/tenants/{tenant_id}/subscription", dependencies=[Depends(get_current_admin)])
+async def admin_grant_subscription(tenant_id: str, payload: SubscriptionGrant, db: AsyncSession = Depends(get_db)):
+    if payload.days <= 0:
+        raise HTTPException(status_code=422, detail="days must be positive")
+    tenant = await get_tenant_by_id(db, tenant_id)
+    if tenant is None:
+        raise HTTPException(status_code=404, detail="Unknown tenant")
+    tenant = await grant_subscription(db, tenant, payload.days)
+    logger.warning("Admin granted %d day(s) to tenant %s, now expires %s", payload.days, tenant.id, tenant.subscription_expires_at)
+    return _serialize_tenant_for_admin(tenant, utcnow_naive())
+
+
+@app.post("/admin/tenants/{tenant_id}/revoke-subscription", dependencies=[Depends(get_current_admin)])
+async def admin_revoke_subscription(tenant_id: str, db: AsyncSession = Depends(get_db)):
+    tenant = await get_tenant_by_id(db, tenant_id)
+    if tenant is None:
+        raise HTTPException(status_code=404, detail="Unknown tenant")
+    tenant = await revoke_subscription(db, tenant)
+    logger.warning("Admin revoked subscription for tenant %s", tenant.id)
+    return _serialize_tenant_for_admin(tenant, utcnow_naive())
+
+
 @app.post("/webhook/tradingview/{webhook_id}")
 async def tradingview_webhook(webhook_id: str, request: Request, db: AsyncSession = Depends(get_db)):
     tenant = await get_tenant_by_webhook_id(db, webhook_id)
@@ -265,9 +328,16 @@ async def agent_ws(websocket: WebSocket):
         manager.disconnect(tenant.id)
 
 
+_web_dir = Path(__file__).resolve().parent.parent / "web"
+
+
+@app.get("/admin")
+def admin_page():
+    return FileResponse(str(_web_dir / "admin.html"))
+
+
 # Mounted last so it never shadows an API route above - Starlette matches
 # routes in registration order, and a "/" static mount would otherwise
 # swallow everything.
-_web_dir = Path(__file__).resolve().parent.parent / "web"
 if _web_dir.is_dir():
     app.mount("/", StaticFiles(directory=str(_web_dir), html=True), name="dashboard")

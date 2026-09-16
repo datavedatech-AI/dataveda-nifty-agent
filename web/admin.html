@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>DataVeda Admin</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%F0%9F%94%92%3C/text%3E%3C/svg%3E" />
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="topbar-inner">
+      <span class="brand">DataVeda <span class="brand-accent">Admin</span></span>
+      <div id="topbar-account" class="topbar-account hidden">
+        <button id="logout-btn" class="btn btn-ghost btn-sm">Log out</button>
+      </div>
+    </div>
+  </header>
+
+  <main class="container">
+
+    <section id="auth-view" class="auth-view">
+      <div class="card auth-card">
+        <h2>Admin login</h2>
+        <p class="hint" style="margin-top:0">Not a customer login - this is the platform owner's key (<code>ADMIN_API_KEY</code>).</p>
+        <form id="login-form">
+          <label for="login-key">Admin key</label>
+          <input id="login-key" type="password" required placeholder="paste ADMIN_API_KEY" autocomplete="off" />
+          <button type="submit" class="btn btn-primary">Log in</button>
+        </form>
+        <p id="auth-error" class="error hidden"></p>
+      </div>
+    </section>
+
+    <section id="admin-view" class="hidden">
+      <div class="card">
+        <div class="card-header-row">
+          <h2>Tenants</h2>
+          <div class="field-row" style="margin-top:0">
+            <input id="search-box" type="text" placeholder="Filter by email..." style="width:220px" />
+            <button id="refresh-btn" class="btn btn-sm btn-ghost">Refresh</button>
+          </div>
+        </div>
+        <table class="table">
+          <thead>
+            <tr>
+              <th>Email</th>
+              <th>Subscription</th>
+              <th>Trading</th>
+              <th>Created</th>
+              <th>Grant access</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody id="tenants-rows"><tr><td colspan="6" class="muted">Loading...</td></tr></tbody>
+        </table>
+      </div>
+    </section>
+
+    <p id="toast" class="toast hidden"></p>
+  </main>
+
+  <script src="/admin.js"></script>
+</body>
+</html>

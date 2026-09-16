@@ -1,6 +1,8 @@
+import datetime as dt
+
 from app.models.signal import TradingViewSignal
 from app.risk.manager import check_risk
-from app.storage.repository import create_tenant, log_trade
+from app.storage.repository import create_tenant, grant_subscription, log_trade
 
 
 def make_signal(**overrides) -> TradingViewSignal:
@@ -23,6 +25,10 @@ async def _tenant(db_session, **risk_overrides):
     tenant.risk_settings = {**tenant.risk_settings, **risk_overrides}
     await db_session.commit()
     await db_session.refresh(tenant)
+    # An active subscription is the precondition for every other check, so
+    # grant one by default here - tests that specifically exercise the
+    # subscription gate itself (below) manage it explicitly instead.
+    tenant = await grant_subscription(db_session, tenant, days=30)
     return tenant
 
 
@@ -98,3 +104,33 @@ async def test_daily_loss_only_counts_this_tenant(db_session):
 
     result = await check_risk(tenant_a, make_signal(), db_session)
     assert result.allowed is True
+
+
+async def test_no_subscription_blocks(db_session):
+    tenant, _ = await create_tenant(db_session, "never-activated@example.com")
+    result = await check_risk(tenant, make_signal(), db_session)
+    assert result.allowed is False
+    assert "No active subscription" in result.reason
+
+
+async def test_expired_subscription_blocks(db_session):
+    tenant, _ = await create_tenant(db_session, "lapsed@example.com")
+    tenant.subscription_expires_at = dt.datetime.now(dt.timezone.utc).replace(tzinfo=None) - dt.timedelta(days=1)
+    await db_session.commit()
+
+    result = await check_risk(tenant, make_signal(), db_session)
+    assert result.allowed is False
+    assert "No active subscription" in result.reason
+
+
+async def test_subscription_check_runs_before_kill_switch(db_session):
+    # A clearer error for the account owner: "you haven't paid" beats
+    # "trading is paused" when both happen to be true at once.
+    tenant, _ = await create_tenant(db_session, "both-blocked@example.com")
+    tenant.kill_switch_engaged = True
+    tenant.kill_switch_reason = "manual halt"
+    await db_session.commit()
+
+    result = await check_risk(tenant, make_signal(), db_session)
+    assert result.allowed is False
+    assert "No active subscription" in result.reason

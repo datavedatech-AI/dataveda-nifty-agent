@@ -74,6 +74,44 @@ you can:
 It talks to the same JSON API documented below - nothing in `/me/*` is
 dashboard-only.
 
+## Subscriptions (manual billing)
+
+Payment is handled outside the app - a customer pays you directly (bank
+transfer, UPI, whatever), and you grant them access. There's no
+self-service checkout.
+
+A brand new signup **cannot trade**: `Tenant.subscription_expires_at` is
+`None` until you grant it, and the subscription check is the very first
+thing `check_risk` evaluates (before the kill switch, before anything
+else) - every signal gets rejected with "No active subscription" until
+you do. Once you receive payment:
+
+```bash
+curl -X POST http://localhost:8000/admin/tenants/<tenant_id>/subscription \
+  -H "X-Admin-Key: <ADMIN_API_KEY>" -H "Content-Type: application/json" \
+  -d '{"days": 30}'
+```
+
+or use the admin page at `/admin` (paste `ADMIN_API_KEY` to log in) -
+find the tenant, click Grant. Renewing early stacks onto the existing
+expiry instead of resetting it, so paying a few days before expiry never
+costs the customer those remaining days; renewing a lapsed account starts
+fresh from now. `POST /admin/tenants/{id}/revoke-subscription` cuts
+access immediately (chargebacks, disputes).
+
+**`ADMIN_API_KEY` must be set** (`.env` or the environment) before any
+`/admin/*` route works - unset, they fail closed (401) rather than
+silently allowing access. This key is yours, not a customer's; keep it
+out of anything customer-facing.
+
+## Admin page
+
+`/admin` - separate from the customer dashboard, logged in with
+`ADMIN_API_KEY` (stored in the browser's localStorage under a different
+key than the customer login, so the two never collide in the same
+browser). Lists every tenant with their subscription/trading status and
+lets you grant or revoke access without curl.
+
 ## Quickstart (local dev)
 
 ```bash
@@ -134,8 +172,12 @@ pytest -q
 | `POST /me/regenerate-agent-token` | Bearer api_key | Rotate the agent token (any connected agent must reconnect with the new one) |
 | `POST /webhook/tradingview/{webhook_id}` | passphrase in body | TradingView alerts land here |
 | `WS /agent/ws?token=<agent_token>` | agent_token | The bridge agent's persistent connection |
+| `GET /admin/tenants` | `X-Admin-Key` | List all tenants + subscription/trading status |
+| `POST /admin/tenants/{id}/subscription` | `X-Admin-Key` | Grant/extend access (`{"days": 30}`) |
+| `POST /admin/tenants/{id}/revoke-subscription` | `X-Admin-Key` | Immediate cutoff |
 | `GET /health` | none | Liveness check |
-| `GET /` | none | Dashboard (static files from `web/`) |
+| `GET /` | none | Customer dashboard (static files from `web/`) |
+| `GET /admin` | none (page itself; API calls it makes need the key) | Admin page |
 
 ## Risk management
 
@@ -192,8 +234,10 @@ is never part of this deployment - customers run it themselves via
   email verification, or session system, and a lost key has no recovery
   path other than signing up again. Fine for early users, not for a
   public launch.
-- **Billing.** No Stripe integration; `plan` exists on the Tenant model as
-  a placeholder.
+- **Self-service billing.** Subscriptions are enforced (see above) but
+  granted manually by you, not purchased - no Stripe/payment integration,
+  no invoicing, no automatic renewal reminder before a subscription lapses.
+  `plan` exists on the Tenant model as a placeholder for tiered pricing later.
 - **Multi-broker.** MT5-only by design (see the SEBI/regulatory discussion
   this pivot came out of) - a DHAN adapter existed in an earlier version
   and can be reintroduced as an async adapter later.

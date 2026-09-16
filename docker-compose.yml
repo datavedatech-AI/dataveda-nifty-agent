@@ -20,6 +20,8 @@ services:
     environment:
       DATABASE_URL: postgresql+asyncpg://dataveda:${POSTGRES_PASSWORD:-changeme}@db:5432/dataveda
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      ADMIN_API_KEY: ${ADMIN_API_KEY:?set ADMIN_API_KEY in .env - required for /admin/* to work}
+      BRIDGE_ORDER_TIMEOUT_SECONDS: ${BRIDGE_ORDER_TIMEOUT_SECONDS:-8.0}
     depends_on:
       db:
         condition: service_healthy
