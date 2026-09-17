@@ -1,0 +1,7 @@
+# Install this in addition to requirements.txt only when deploying against
+# a real Postgres database (DATABASE_URL=postgresql+asyncpg://...) - e.g.
+# in the Docker image (see Dockerfile), which builds on Linux where
+# asyncpg's prebuilt wheels are available. Not needed for local dev/tests,
+# which use SQLite (aiosqlite, already in requirements.txt).
+-r requirements.txt
+asyncpg==0.29.0

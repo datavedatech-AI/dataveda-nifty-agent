@@ -6,8 +6,8 @@ WORKDIR /app
 # customer's own Windows machine, next to their MT5 terminal, and is
 # installed separately via requirements-bridge-agent.txt - it is never
 # part of this image.
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+COPY requirements.txt requirements-postgres.txt ./
+RUN pip install --no-cache-dir -r requirements-postgres.txt
 
 COPY app ./app
 COPY web ./web

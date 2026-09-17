@@ -4,6 +4,12 @@ pydantic==2.9.2
 pydantic-settings==2.5.2
 email-validator==2.2.0
 SQLAlchemy==2.0.35
-asyncpg==0.29.0
 aiosqlite==0.20.0
 python-dotenv==1.0.1
+
+# Postgres driver (asyncpg) is intentionally NOT here - see
+# requirements-postgres.txt. It has no prebuilt wheel for every Python/OS
+# combo (notably Python 3.13 on Windows) and pip falls back to compiling
+# it from source, which fails without a matching MSVC toolchain and can
+# break on newer CPython C-API changes. SQLite (aiosqlite, above) is all
+# local dev and tests need.

@@ -135,16 +135,41 @@ once per tenant per expiry so it doesn't re-notify on every check).
 
 ## Quickstart (local dev)
 
+macOS/Linux:
+
 ```bash
-python3 -m venv .venv && source .venv/bin/activate
+python3 -m venv .venv
+source .venv/bin/activate
 pip install -r requirements-dev.txt
 
 cp .env.example .env
 # for local dev, DATABASE_URL=sqlite+aiosqlite:///./data/tenants.db is fine -
-# Postgres is recommended once you're past solo testing
+# Postgres (requirements-postgres.txt) is only needed for a real deployment
 
 uvicorn app.main:app --reload
 ```
+
+Windows (PowerShell) - note `&&` isn't valid PowerShell syntax, run each line separately:
+
+```powershell
+python -m venv .venv
+.venv\Scripts\Activate.ps1
+pip install -r requirements-dev.txt
+
+copy .env.example .env
+# edit .env: DATABASE_URL=sqlite+aiosqlite:///./data/tenants.db
+
+uvicorn app.main:app --reload
+```
+
+`requirements-dev.txt` never installs `asyncpg` (the Postgres driver) -
+it has no prebuilt wheel for every Python/OS combo (Python 3.13 on
+Windows notably) and pip falls back to compiling it from source, which
+needs a matching MSVC toolchain and can fail outright against newer
+CPython internals. Local dev and tests only need SQLite
+(`aiosqlite`, already included). Only pull in `requirements-postgres.txt`
+when you're actually pointing `DATABASE_URL` at a real Postgres server -
+the Docker image does this for you already.
 
 Sign up and configure an account:
 
