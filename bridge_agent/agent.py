@@ -1,8 +1,8 @@
-"""DataVeda MT5 Bridge Agent.
+"""Shree Krishna Traders MT5 Bridge Agent.
 
 Run this on the Windows machine where your MT5 terminal is installed and
-logged in. It opens an OUTBOUND WebSocket connection to the DataVeda cloud
-service and holds it open - no inbound ports, no port forwarding, no
+logged in. It opens an OUTBOUND WebSocket connection to the Shree Krishna
+Traders cloud service and holds it open - no inbound ports, no port forwarding, no
 static IP needed on this machine. Orders arrive as JSON messages over that
 live connection and are placed via the MetaTrader5 package immediately.
 
@@ -136,8 +136,8 @@ async def run(server_url: str, token: str, mt5_login: str, mt5_password: str, mt
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="DataVeda MT5 bridge agent")
-    parser.add_argument("--server", required=True, help="wss://.../agent/ws URL of the DataVeda service")
+    parser = argparse.ArgumentParser(description="Shree Krishna Traders MT5 bridge agent")
+    parser.add_argument("--server", required=True, help="wss://.../agent/ws URL of the Shree Krishna Traders service")
     parser.add_argument("--token", required=True, help="Your account's agent_token from /signup")
     parser.add_argument("--mt5-login", default="", help="Leave blank to use the terminal's already-logged-in session")
     parser.add_argument("--mt5-password", default="")

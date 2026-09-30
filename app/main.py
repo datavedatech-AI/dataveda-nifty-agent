@@ -60,7 +60,7 @@ async def lifespan(app: FastAPI):
     await engine.dispose()
 
 
-app = FastAPI(title="DataVeda MT5 Bridge", lifespan=lifespan)
+app = FastAPI(title="Shree Krishna Traders MT5 Bridge", lifespan=lifespan)
 
 
 async def get_db(request: Request):
