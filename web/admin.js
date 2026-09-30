@@ -2,7 +2,13 @@
   "use strict";
 
   const LS_KEY = "dataveda_admin_key";
-  let adminKey = localStorage.getItem(LS_KEY);
+  // Deliberately not persisted (no localStorage) - every visit requires
+  // logging in again rather than auto-resuming a saved session, and this
+  // key in particular (the platform owner's master key) shouldn't sit in
+  // browser storage. LS_KEY is only used to clear out any key a
+  // pre-existing browser saved before this behavior changed.
+  let adminKey = null;
+  localStorage.removeItem(LS_KEY);
   let tenantsCache = [];
 
   const $ = (id) => document.getElementById(id);
@@ -77,7 +83,6 @@
     adminKey = $("login-key").value.trim();
     try {
       await api("/admin/tenants?limit=1");
-      localStorage.setItem(LS_KEY, adminKey);
       showAdminView();
     } catch (err) {
       adminKey = null;
@@ -88,7 +93,6 @@
 
   $("logout-btn").addEventListener("click", () => {
     adminKey = null;
-    localStorage.removeItem(LS_KEY);
     showAuthView();
   });
 
@@ -216,7 +220,6 @@
     } catch (err) {
       if (err.status === 401) {
         adminKey = null;
-        localStorage.removeItem(LS_KEY);
         showAuthView();
       } else {
         toast(err.message, true);
@@ -224,15 +227,5 @@
     }
   }
 
-  if (adminKey) {
-    api("/admin/tenants?limit=1")
-      .then(() => showAdminView())
-      .catch(() => {
-        adminKey = null;
-        localStorage.removeItem(LS_KEY);
-        showAuthView();
-      });
-  } else {
-    showAuthView();
-  }
+  showAuthView();
 })();

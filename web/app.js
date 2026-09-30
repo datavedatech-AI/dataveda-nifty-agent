@@ -2,7 +2,12 @@
   "use strict";
 
   const LS_KEY = "dataveda_api_key";
-  let apiKey = localStorage.getItem(LS_KEY);
+  // Deliberately not persisted (no localStorage) - the owner wants every
+  // visit to the dashboard to require logging in again, not auto-resume a
+  // saved session. LS_KEY is only used to clear out any key a pre-existing
+  // browser saved before this behavior changed.
+  let apiKey = null;
+  localStorage.removeItem(LS_KEY);
   let pollHandle = null;
   // Kept in memory only (never persisted) - populated right after signup or
   // a "regenerate agent token" call, so we can show the real bridge-agent
@@ -126,7 +131,6 @@
       $("secrets-modal").classList.remove("hidden");
       $("secrets-confirm-btn").onclick = () => {
         apiKey = account.api_key;
-        localStorage.setItem(LS_KEY, apiKey);
         $("secrets-modal").classList.add("hidden");
         showDashboardView();
       };
@@ -143,7 +147,6 @@
     apiKey = key;
     try {
       await api("/me");
-      localStorage.setItem(LS_KEY, apiKey);
       showDashboardView();
     } catch (err) {
       apiKey = null;
@@ -155,7 +158,6 @@
   $("logout-btn").addEventListener("click", () => {
     apiKey = null;
     lastKnownAgentToken = null;
-    localStorage.removeItem(LS_KEY);
     showAuthView();
   });
 
@@ -377,7 +379,6 @@
       if (err.status === 401) {
         toast("Session expired - please log in again", true);
         apiKey = null;
-        localStorage.removeItem(LS_KEY);
         showAuthView();
       }
     }
@@ -385,15 +386,5 @@
 
   // ---------------------------------------------------------------- boot
 
-  if (apiKey) {
-    api("/me")
-      .then(() => showDashboardView())
-      .catch(() => {
-        apiKey = null;
-        localStorage.removeItem(LS_KEY);
-        showAuthView();
-      });
-  } else {
-    showAuthView();
-  }
+  showAuthView();
 })();
