@@ -52,13 +52,34 @@
               <th>Trading</th>
               <th>Created</th>
               <th>Grant access</th>
-              <th></th>
+              <th>Actions</th>
             </tr>
           </thead>
           <tbody id="tenants-rows"><tr><td colspan="6" class="muted">Loading...</td></tr></tbody>
         </table>
       </div>
     </section>
+
+    <!-- One-time secret reveal after a credentials reset -->
+    <div id="reset-modal" class="modal-backdrop hidden">
+      <div class="card modal">
+        <h2>Save these now</h2>
+        <p class="hint">These are shown <strong>once</strong>. The tenant's old api_key, webhook passphrase, and agent token stop working immediately - pass these new values to the customer now.</p>
+        <div class="secret-row">
+          <label>API key</label>
+          <div class="copy-field"><code id="reset-api-key"></code><button class="btn btn-sm copy-btn" data-copy="reset-api-key">Copy</button></div>
+        </div>
+        <div class="secret-row">
+          <label>Webhook passphrase</label>
+          <div class="copy-field"><code id="reset-passphrase"></code><button class="btn btn-sm copy-btn" data-copy="reset-passphrase">Copy</button></div>
+        </div>
+        <div class="secret-row">
+          <label>Agent token</label>
+          <div class="copy-field"><code id="reset-agent-token"></code><button class="btn btn-sm copy-btn" data-copy="reset-agent-token">Copy</button></div>
+        </div>
+        <button id="reset-modal-close-btn" class="btn btn-primary">I've saved these - close</button>
+      </div>
+    </div>
 
     <p id="toast" class="toast hidden"></p>
   </main>

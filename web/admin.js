@@ -43,6 +43,21 @@
     return data;
   }
 
+  document.addEventListener("click", (e) => {
+    const btn = e.target.closest(".copy-btn");
+    if (!btn) return;
+    const src = $(btn.dataset.copy);
+    if (!src) return;
+    navigator.clipboard
+      .writeText(src.textContent)
+      .then(() => toast("Copied"))
+      .catch(() => toast("Could not copy - select and copy manually", true));
+  });
+
+  $("reset-modal-close-btn").addEventListener("click", () => {
+    $("reset-modal").classList.add("hidden");
+  });
+
   function showAuthView() {
     $("auth-view").classList.remove("hidden");
     $("admin-view").classList.add("hidden");
@@ -113,7 +128,12 @@
             <button class="btn btn-sm btn-primary grant-btn">Grant</button>
           </div>
         </td>
-        <td><button class="btn btn-sm btn-ghost revoke-btn">Revoke</button></td>
+        <td>
+          <div class="field-row" style="margin-top:0">
+            <button class="btn btn-sm btn-ghost revoke-btn">Revoke</button>
+            <button class="btn btn-sm btn-ghost reset-creds-btn">Reset credentials</button>
+          </div>
+        </td>
       </tr>`
       )
       .join("");
@@ -143,6 +163,24 @@
           await api(`/admin/tenants/${tenantId}/revoke-subscription`, { method: "POST" });
           toast("Revoked");
           loadTenants();
+        } catch (err) {
+          toast(err.message, true);
+        }
+      });
+    });
+
+    tbody.querySelectorAll(".reset-creds-btn").forEach((btn) => {
+      btn.addEventListener("click", async () => {
+        const row = btn.closest("tr");
+        const tenantId = row.dataset.tenantId;
+        const email = row.children[0].textContent;
+        if (!confirm(`Reset ${email}'s credentials? Their current api_key, webhook passphrase, and agent token stop working immediately.`)) return;
+        try {
+          const result = await api(`/admin/tenants/${tenantId}/reset-credentials`, { method: "POST" });
+          $("reset-api-key").textContent = result.api_key;
+          $("reset-passphrase").textContent = result.webhook_passphrase;
+          $("reset-agent-token").textContent = result.agent_token;
+          $("reset-modal").classList.remove("hidden");
         } catch (err) {
           toast(err.message, true);
         }

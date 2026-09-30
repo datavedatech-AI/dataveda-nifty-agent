@@ -28,6 +28,7 @@ from app.storage.repository import (
     list_trades,
     regenerate_agent_token,
     regenerate_webhook_passphrase,
+    reset_tenant_credentials,
     revoke_subscription,
     set_kill_switch,
     subscription_status,
@@ -263,6 +264,23 @@ async def admin_revoke_subscription(tenant_id: str, db: AsyncSession = Depends(g
     tenant = await revoke_subscription(db, tenant)
     logger.warning("Admin revoked subscription for tenant %s", tenant.id)
     return _serialize_tenant_for_admin(tenant)
+
+
+@app.post("/admin/tenants/{tenant_id}/reset-credentials", dependencies=[Depends(get_current_admin)])
+async def admin_reset_credentials(tenant_id: str, db: AsyncSession = Depends(get_db)):
+    tenant = await get_tenant_by_id(db, tenant_id)
+    if tenant is None:
+        raise HTTPException(status_code=404, detail="Unknown tenant")
+    tenant, secrets_once = await reset_tenant_credentials(db, tenant)
+    logger.warning("Admin reset credentials for tenant %s", tenant.id)
+    return {
+        "tenant_id": tenant.id,
+        "email": tenant.email,
+        "api_key": secrets_once["api_key"],
+        "webhook_passphrase": secrets_once["webhook_passphrase"],
+        "agent_token": secrets_once["agent_token"],
+        "message": "Shown only once - pass these to the customer now. Their old api_key, webhook_passphrase, and agent_token stop working immediately.",
+    }
 
 
 @app.post("/webhook/tradingview/{webhook_id}")

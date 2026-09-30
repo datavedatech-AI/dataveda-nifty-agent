@@ -260,3 +260,26 @@ async def regenerate_agent_token(session: AsyncSession, tenant: Tenant) -> tuple
     await session.commit()
     await session.refresh(tenant)
     return tenant, new_token
+
+
+async def reset_tenant_credentials(session: AsyncSession, tenant: Tenant) -> tuple[Tenant, dict]:
+    """Admin-initiated recovery for a tenant that lost its api_key (there's
+    no self-service reset - only the hash is stored, so it can't be looked
+    up). Replaces all three secrets; webhook_id is untouched since it's not
+    sensitive on its own and changing it would break the customer's saved
+    TradingView alert URL for no reason.
+    """
+    new_api_key = _generate_id("sk_live", 24)
+    new_passphrase = secrets.token_urlsafe(18)
+    new_token = _generate_id("agent", 24)
+
+    tenant.api_key_hash = hash_secret(new_api_key)
+    tenant.webhook_passphrase_hash = hash_secret(new_passphrase)
+    tenant.agent_token_hash = hash_secret(new_token)
+    await session.commit()
+    await session.refresh(tenant)
+    return tenant, {
+        "api_key": new_api_key,
+        "webhook_passphrase": new_passphrase,
+        "agent_token": new_token,
+    }

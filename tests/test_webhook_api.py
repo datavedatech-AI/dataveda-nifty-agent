@@ -387,6 +387,36 @@ def test_admin_revoke_reblocks_trading(client: TestClient):
     assert "No active subscription" in webhook_resp.json()["message"]
 
 
+def test_admin_reset_credentials(client: TestClient):
+    account = _signup(client)
+    old_api_key = account["api_key"]
+
+    resp = client.post(f"/admin/tenants/{account['tenant_id']}/reset-credentials", headers=_admin_headers())
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["api_key"] != old_api_key
+    assert body["webhook_passphrase"] != account["webhook_passphrase"]
+    assert body["agent_token"] != account["agent_token"]
+
+    # Old api_key is dead.
+    assert client.get("/me", headers=_auth_headers(account)).status_code == 401
+    # New api_key works and resolves to the same tenant/account.
+    resp = client.get("/me", headers={"Authorization": f"Bearer {body['api_key']}"})
+    assert resp.status_code == 200
+    assert resp.json()["tenant_id"] == account["tenant_id"]
+
+
+def test_admin_reset_credentials_unknown_tenant_404(client: TestClient):
+    resp = client.post("/admin/tenants/does-not-exist/reset-credentials", headers=_admin_headers())
+    assert resp.status_code == 404
+
+
+def test_admin_reset_credentials_requires_key(client: TestClient):
+    account = _signup(client)
+    resp = client.post(f"/admin/tenants/{account['tenant_id']}/reset-credentials")
+    assert resp.status_code == 401
+
+
 def test_grant_subscription_stacks_via_api(client: TestClient):
     account = _signup(client)
     first = _grant_subscription(client, account, days=30)
