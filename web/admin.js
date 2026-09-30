@@ -158,7 +158,7 @@
         const row = btn.closest("tr");
         const tenantId = row.dataset.tenantId;
         const email = row.children[0].textContent;
-        if (!confirm(`Revoke ${email}'s subscription immediately?`)) return;
+        if (!(await confirmDialog(`Revoke ${email}'s subscription immediately?`, { title: "Revoke subscription?", confirmLabel: "Revoke", danger: true }))) return;
         try {
           await api(`/admin/tenants/${tenantId}/revoke-subscription`, { method: "POST" });
           toast("Revoked");
@@ -174,7 +174,13 @@
         const row = btn.closest("tr");
         const tenantId = row.dataset.tenantId;
         const email = row.children[0].textContent;
-        if (!confirm(`Reset ${email}'s credentials? Their current api_key, webhook passphrase, and agent token stop working immediately.`)) return;
+        if (
+          !(await confirmDialog(
+            `Reset ${email}'s credentials? Their current api_key, webhook passphrase, and agent token stop working immediately.`,
+            { title: "Reset credentials?", confirmLabel: "Reset credentials", danger: true }
+          ))
+        )
+          return;
         try {
           const result = await api(`/admin/tenants/${tenantId}/reset-credentials`, { method: "POST" });
           $("reset-api-key").textContent = result.api_key;

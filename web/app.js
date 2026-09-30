@@ -312,7 +312,7 @@
   }
 
   $("regen-passphrase-btn").addEventListener("click", async () => {
-    if (!confirm("This invalidates your current webhook passphrase. Continue?")) return;
+    if (!(await confirmDialog("This invalidates your current webhook passphrase. Continue?", { danger: true }))) return;
     try {
       const res = await api("/me/regenerate-webhook-passphrase", { method: "POST" });
       showRegenReveal("New webhook passphrase (shown once)", res.webhook_passphrase);
@@ -323,7 +323,7 @@
   });
 
   $("regen-agent-token-btn").addEventListener("click", async () => {
-    if (!confirm("This invalidates your current agent token - your running bridge agent will need to reconnect with the new one. Continue?")) return;
+    if (!(await confirmDialog("This invalidates your current agent token - your running bridge agent will need to reconnect with the new one. Continue?", { danger: true }))) return;
     try {
       const res = await api("/me/regenerate-agent-token", { method: "POST" });
       lastKnownAgentToken = res.agent_token;
